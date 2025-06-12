@@ -55,6 +55,10 @@ echo = Pin(23, Pin.IN)
 # Button
 button = Pin(18, Pin.IN, Pin.PULL_UP)
 
+# Electromagnet
+electromagnet = Pin(5, Pin.OUT)
+electromagnet.off()
+
 # IR line sensors
 ir_pins = [
     Pin(39, Pin.IN),
@@ -117,6 +121,12 @@ def read_all():
 
         # Button state
         button_pressed = button.value() == 1
+        
+        # Activate electromagnet
+        if button.value() == 0:
+            electromagnet.off()
+        else:
+            electromagnet.on()
 
         # IR line sensor values
         ir_values = [pin.value() for pin in ir_pins]
@@ -135,3 +145,4 @@ def read_all():
 
 # Start main loop
 read_all()
+
