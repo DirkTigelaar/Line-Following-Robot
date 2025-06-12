@@ -1,8 +1,5 @@
-# THIS CODE READS ALL SENSOR DATA AND PRINTS IT
-
 from machine import Pin, I2C
 from time import sleep_us, sleep_ms, ticks_us, ticks_diff
-import _thread
 
 # ----- MPU6050 Setup -----
 class MPU6050:
@@ -45,28 +42,10 @@ def read_distance(trig, echo):
     distance_cm = duration / 58.0
     return distance_cm
 
-# ----- Encoder Interrupt Setup -----
-encoderA_count = 0
-encoderB_count = 0
-
-def encoderA_handler(pin):
-    global encoderA_count
-    if encA_B.value():
-        encoderA_count += 1
-    else:
-        encoderA_count -= 1
-
-def encoderB_handler(pin):
-    global encoderB_count
-    if encB_B.value():
-        encoderB_count += 1
-    else:
-        encoderB_count -= 1
-
 # ----- Setup Pins -----
 
 # MPU6050 I2C
-i2c = I2C(0, scl=Pin(22), sda=Pin(21))  # Adjust pins as needed
+i2c = I2C(0, scl=Pin(22), sda=Pin(21))
 mpu = MPU6050(i2c)
 
 # Ultrasonic sensor
@@ -85,14 +64,43 @@ ir_pins = [
     Pin(36, Pin.IN)
 ]
 
-# Encoders
-encA_A = Pin(16, Pin.IN)
-encA_B = Pin(17, Pin.IN)
-encA_A.irq(trigger=Pin.IRQ_RISING | Pin.IRQ_FALLING, handler=encoderA_handler)
+# ----- Encoder Pins and Setup -----
+pin_a1 = Pin(25, Pin.IN, Pin.PULL_UP)
+pin_b1 = Pin(26, Pin.IN, Pin.PULL_UP)
 
-encB_A = Pin(25, Pin.IN)
-encB_B = Pin(26, Pin.IN)
-encB_A.irq(trigger=Pin.IRQ_RISING | Pin.IRQ_FALLING, handler=encoderB_handler)
+pin_a2 = Pin(17, Pin.IN, Pin.PULL_UP)
+pin_b2 = Pin(16, Pin.IN, Pin.PULL_UP)
+
+position1 = 0
+last_state1 = pin_a1.value()
+
+position2 = 0
+last_state2 = pin_a2.value()
+
+def update_position1(pin):
+    global position1, last_state1
+    state = pin_a1.value()
+    b_state = pin_b1.value()
+    if state != last_state1:
+        if b_state != state:
+            position1 += 1
+        else:
+            position1 -= 1
+    last_state1 = state
+
+def update_position2(pin):
+    global position2, last_state2
+    state = pin_a2.value()
+    b_state = pin_b2.value()
+    if state != last_state2:
+        if b_state != state:
+            position2 += 1
+        else:
+            position2 -= 1
+    last_state2 = state
+
+pin_a1.irq(trigger=Pin.IRQ_RISING | Pin.IRQ_FALLING, handler=update_position1)
+pin_a2.irq(trigger=Pin.IRQ_RISING | Pin.IRQ_FALLING, handler=update_position2)
 
 # ----- Data Reading Loop -----
 def read_all():
@@ -120,8 +128,8 @@ def read_all():
         print("Distance: {:.2f} cm".format(dist) if dist != -1 else "Ultrasonic: Error")
         print("Button Pressed:", button_pressed)
         print("IR Sensors:", ir_values)
-        print("Encoder A Count:", encoderA_count)
-        print("Encoder B Count:", encoderB_count)
+        print("Encoder 1 Count:", position1)
+        print("Encoder 2 Count:", position2)
 
         sleep_ms(200)
 
