@@ -1,5 +1,31 @@
+# THIS CODE READS ALL THE SENSOR VALUES WHILST DRIVING THE CART FORWARDS
+
 from machine import Pin, I2C
 from time import sleep_us, sleep_ms, ticks_us, ticks_diff
+
+# --- Motor Control Setup ---
+# L9110S Motor Driver Pins
+# Motor 1 (Left Wheel)
+motor1_in1 = Pin(12, Pin.OUT)
+motor1_in2 = Pin(13, Pin.OUT)
+
+# Motor 2 (Right Wheel)
+motor2_in1 = Pin(14, Pin.OUT)
+motor2_in2 = Pin(27, Pin.OUT)
+
+def drive_forward():
+    # Set motor 1 to go forward
+    motor1_in1.value(1)
+    motor1_in2.value(0)
+    # Set motor 2 to go forward
+    motor2_in1.value(1)
+    motor2_in2.value(0)
+
+def stop_motors():
+    motor1_in1.value(0)
+    motor1_in2.value(0)
+    motor2_in1.value(0)
+    motor2_in2.value(0)
 
 # ----- MPU6050 Setup -----
 class MPU6050:
@@ -15,6 +41,8 @@ class MPU6050:
             value -= 65536
         return value
 
+    # We will no longer call get_accel(), but keeping it here is harmless
+    # if you decide to use it later, or you can remove it entirely.
     def get_accel(self):
         ax = self.read_raw(0x3B) / 16384.0
         ay = self.read_raw(0x3D) / 16384.0
@@ -106,43 +134,50 @@ def update_position2(pin):
 pin_a1.irq(trigger=Pin.IRQ_RISING | Pin.IRQ_FALLING, handler=update_position1)
 pin_a2.irq(trigger=Pin.IRQ_RISING | Pin.IRQ_FALLING, handler=update_position2)
 
-# ----- Data Reading Loop -----
-def read_all():
-    while True:
-        # MPU6050
-        ax, ay, az = mpu.get_accel()
-        gx, gy, gz = mpu.get_gyro()
+# ----- Data Reading and Motor Control Loop -----
+def run_cart():
+    try:
+        drive_forward()
 
-        # Ultrasonic distance
-        try:
-            dist = read_distance(trig, echo)
-        except:
-            dist = -1
+        while True:
+            # MPU6050 Gyroscope only
+            # ax, ay, az = mpu.get_accel() # Removed this line
+            gx, gy, gz = mpu.get_gyro()
 
-        # Button state
-        button_pressed = button.value() == 1
-        
-        # Activate electromagnet
-        if button.value() == 0:
-            electromagnet.off()
-        else:
-            electromagnet.on()
+            # Ultrasonic distance
+            try:
+                dist = read_distance(trig, echo)
+            except:
+                dist = -1
 
-        # IR line sensor values
-        ir_values = [pin.value() for pin in ir_pins]
+            # Button state
+            button_pressed = button.value() == 1
+            
+            # Activate electromagnet
+            if button.value() == 0:
+                electromagnet.off()
+            else:
+                electromagnet.on()
 
-        # Print all data
-        print("\n--- Sensor Readings ---")
-        print("Accel: ax={:.2f}, ay={:.2f}, az={:.2f}".format(ax, ay, az))
-        print("Gyro : gx={:.2f}, gy={:.2f}, gz={:.2f}".format(gx, gy, gz))
-        print("Distance: {:.2f} cm".format(dist) if dist != -1 else "Ultrasonic: Error")
-        print("Button Pressed:", button_pressed)
-        print("IR Sensors:", ir_values)
-        print("Encoder 1 Count:", position1)
-        print("Encoder 2 Count:", position2)
+            # IR line sensor values
+            ir_values = [pin.value() for pin in ir_pins]
 
-        sleep_ms(200)
+            # Print all data
+            print("\n--- Sensor Readings ---")
+            # print("Accel: ax={:.2f}, ay={:.2f}, az={:.2f}".format(ax, ay, az)) # Removed this line
+            print("Gyro : gx={:.2f}, gy={:.2f}, gz={:.2f}".format(gx, gy, gz))
+            print("Distance: {:.2f} cm".format(dist) if dist != -1 else "Ultrasonic: Error")
+            print("Button Pressed:", button_pressed)
+            print("IR Sensors:", ir_values)
+            print("Encoder 1 Count:", position1)
+            print("Encoder 2 Count:", position2)
+
+            sleep_ms(200)
+
+    except KeyboardInterrupt:
+        print("Program interrupted by user.")
+    finally:
+        stop_motors()
 
 # Start main loop
-read_all()
-
+run_cart()
