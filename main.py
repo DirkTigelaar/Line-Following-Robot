@@ -1,5 +1,5 @@
-# THIS CODE READS ALL THE SENSOR VALUES WHILST DRIVING THE CART FORWARDS
-# REMOVED ACCELERATION READINGS
+# THIS CODE READS ALL THE SENSOR VALUES
+# LINE FOLLOWING BAHAVIOUR
 
 from machine import Pin, I2C
 from time import sleep_us, sleep_ms, ticks_us, ticks_diff
@@ -7,26 +7,32 @@ from time import sleep_us, sleep_ms, ticks_us, ticks_diff
 # --- Motor Control Setup ---
 # L9110S Motor Driver Pins
 # Motor 1 (Left Wheel)
-motor1_in1 = Pin(12, Pin.OUT)
-motor1_in2 = Pin(13, Pin.OUT)
+motor1_in1_pin = Pin(12, Pin.OUT)
+motor1_in2_pin = Pin(13, Pin.OUT)
+motor1_pwm = PWM(motor1_in1_pin)
+motor1_pwm.freq(1000)
 
 # Motor 2 (Right Wheel)
-motor2_in1 = Pin(14, Pin.OUT)
-motor2_in2 = Pin(27, Pin.OUT)
+motor2_in1_pin = Pin(14, Pin.OUT)
+motor2_in2_pin = Pin(27, Pin.OUT)
+motor2_pwm = PWM(motor2_in1_pin)
+motor2_pwm.freq(1000)
 
-def drive_forward():
-    # Set motor 1 to go forward
-    motor1_in1.value(1)
-    motor1_in2.value(0)
-    # Set motor 2 to go forward
-    motor2_in1.value(1)
-    motor2_in2.value(0)
+BASE_SPEED = 500
+
+def set_motor_speed(motor_pwm_obj, motor_in2_pin_obj, speed):
+    if speed >= 0: # Forward
+        motor_in2_pin_obj.value(0)
+        motor_pwm_obj.duty(min(speed, 1023))
+    else: # Backward
+        motor_in2_pin_obj.value(1)
+        motor_pwm_obj.duty(min(abs(speed), 1023))
 
 def stop_motors():
-    motor1_in1.value(0)
-    motor1_in2.value(0)
-    motor2_in1.value(0)
-    motor2_in2.value(0)
+    motor1_pwm.duty(0)
+    motor2_pwm.duty(0)
+    motor1_in2_pin.value(0)
+    motor2_in2_pin.value(0)
 
 # ----- MPU6050 Setup -----
 class MPU6050:
@@ -134,50 +140,65 @@ def update_position2(pin):
 pin_a1.irq(trigger=Pin.IRQ_RISING | Pin.IRQ_FALLING, handler=update_position1)
 pin_a2.irq(trigger=Pin.IRQ_RISING | Pin.IRQ_FALLING, handler=update_position2)
 
-# ----- Data Reading and Motor Control Loop -----
-def run_cart():
+# ----- Line Following Specific Paramters ---
+KP = 150
+MAX_CORRECTION = 200
+
+# ----- Line Following Control Loop -----
+def run_line_follower():
     try:
-        drive_forward()
-
         while True:
-            # MPU6050 Gyroscope only
-            # ax, ay, az = mpu.get_accel()
-            gx, gy, gz = mpu.get_gyro()
-
-            # Ultrasonic distance
-            try:
-                dist = read_distance(trig, echo)
-            except:
-                dist = -1
-
-            # Button state
-            button_pressed = button.value() == 1
-            
-            # Activate electromagnet
-            if button.value() == 0:
-                electromagnet.off()
-            else:
-                electromagnet.on()
-
-            # IR line sensor values
             ir_values = [pin.value() for pin in ir_pins]
+            error = 0
+            weights = [-2, -1, 0, 1, 2]
 
-            # Print all data
-            print("\n--- Sensor Readings ---")
-            # print("Accel: ax={:.2f}, ay={:.2f}, az={:.2f}".format(ax, ay, az)) # Removed this line
-            print("Gyro : gx={:.2f}, gy={:.2f}, gz={:.2f}".format(gx, gy, gz))
-            print("Distance: {:.2f} cm".format(dist) if dist != -1 else "Ultrasonic: Error")
-            print("Button Pressed:", button_pressed)
+            num_active_sensors = 0
+            weighted_sum = 0
+
+            for i, sensor_value in enumerate(ir_values):
+                if sensor_value == 0:
+                    weighted_sum += weights[i]
+                    num_active_sensors += 1
+
+            if num_active_sensors > 0:
+                error = weighted_sum / num_active_sensors
+            else:
+                    stop_motors()
+                    print("Line lost! Stopping.")
+                    sleep_ms(500)
+                    continue
+
+            correction = int(error * KP)
+
+            left_speed = BASE_SPEED - correction
+            right_speed = BASE_SPEED + correction
+
+            left_speed = max(0, min(left_speed, 1023))
+            right_speed = max(0, min(right_speed, 1023))
+
+            set_motor_speed(motor1_pwm, motor1_in2_pin, left_speed)
+            set_motor_speed(motor2_pwm, motor2_in2_pin, right_speed)
+
+            print("\n--- Line Following ---")
             print("IR Sensors:", ir_values)
+            print("Error:", error)
+            print("Correction:", correction)
+            print(f"Left Speed: {left_speed}, Right Speed: {right_speed}")
             print("Encoder 1 Count:", position1)
             print("Encoder 2 Count:", position2)
+            try:
+                 dist = read_distance(trig, echo)
+            except:
+                 dist = -1
+            print("Distance: {:.2f} cm".format(dist) if dist != -1 else "Ultrasonic: Error")
 
-            sleep_ms(200)
+            sleep_ms(50)
 
     except KeyboardInterrupt:
         print("Program interrupted by user.")
     finally:
         stop_motors()
+        print("Motors stopped.")
 
-# Start main loop
-run_cart()
+# Start the line following loop
+run_line_follower()
