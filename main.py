@@ -2,7 +2,8 @@
 # LINE FOLLOWING BAHAVIOUR
 
 from machine import Pin, I2C, PWM
-from time import sleep_us, sleep_ms, ticks_us, ticks_diff
+from time import sleep_us, sleep_ms, ticks_us, ticks_diff, sleep
+from math import atan2, sqrt, cos
 
 # --- Motor Control Setup ---
 # L9110S Motor Driver Pins
@@ -40,26 +41,56 @@ class MPU6050:
         self.i2c = i2c
         self.addr = addr
         self.i2c.writeto_mem(self.addr, 0x6B, b'\x00')  # Wake up
+        self.gyro_offset = {'x': 0, 'y': 0, 'z': 0}
 
-    def read_raw(self, reg):
-        data = self.i2c.readfrom_mem(self.addr, reg, 2)
-        value = (data[0] << 8) | data[1]
-        if value > 32767:
-            value -= 65536
+    def _read_raw_data(self, reg):
+        data = self.i2c.readfrom_mem(self.addr, reg, 6)
+        return (
+            self._to_int16(data[0], data[1]),
+            self._to_int16(data[2], data[3]),
+            self._to_int16(data[4], data[5])
+        )
+
+    def _to_int16(self, high, low):
+        value = (high << 8) | low
+        if value >= 0x8000:
+            value -= 0x10000
         return value
 
-    # We will no longer call get_accel(), but keeping it here is harmless
     def get_accel(self):
-        ax = self.read_raw(0x3B) / 16384.0
-        ay = self.read_raw(0x3D) / 16384.0
-        az = self.read_raw(0x3F) / 16384.0
-        return ax, ay, az
+        ax, ay, az = self._read_raw_data(0x3B)
+        return {
+            'x': ax / 16384.0,
+            'y': ay / 16384.0,
+            'z': az / 16384.0
+        }
 
     def get_gyro(self):
-        gx = self.read_raw(0x43) / 131.0
-        gy = self.read_raw(0x45) / 131.0
-        gz = self.read_raw(0x47) / 131.0
-        return gx, gy, gz
+        gx, gy, gz = self._read_raw_data(0x43)
+        ox = self.gyro_offset['x']
+        oy = self.gyro_offset['y']
+        oz = self.gyro_offset['z']
+        return {
+            'x': (gx - ox) / 131.0,
+            'y': (gy - oy) / 131.0,
+            'z': (gz - oz) / 131.0
+        }
+
+    def calibrate_gyro(self, samples=100):
+        print("Calibrating gyro... hold still")
+        sum_x = sum_y = sum_z = 0
+        for _ in range(samples):
+            gx, gy, gz = self._read_raw_data(0x43)
+            sum_x += gx
+            sum_y += gy
+            sum_z += gz
+            sleep(0.01)
+        self.gyro_offset = {
+            'x': sum_x / samples,
+            'y': sum_y / samples,
+            'z': sum_z / samples
+        }
+        print("Gyro calibration complete.")
 
 # ----- Ultrasonic Sensor -----
 def read_distance(trig, echo):
@@ -68,10 +99,20 @@ def read_distance(trig, echo):
     trig.on()
     sleep_us(10)
     trig.off()
+    start = 0
+    end = 0
+    # Wait for echo to go high
+    timeout_us = 25000  # 25 ms timeout for 4m range (approx)
+    start_time_wait = ticks_us()
     while echo.value() == 0:
         start = ticks_us()
+        if ticks_diff(start, start_time_wait) > timeout_us:
+            return -1  # Timeout
+    # Wait for echo to go low
     while echo.value() == 1:
         end = ticks_us()
+        if ticks_diff(end, start) > timeout_us:
+            return -1  # Timeout
     duration = ticks_diff(end, start)
     distance_cm = duration / 58.0
     return distance_cm
@@ -81,6 +122,11 @@ def read_distance(trig, echo):
 # MPU6050 I2C
 i2c = I2C(0, scl=Pin(22), sda=Pin(21))
 mpu = MPU6050(i2c)
+mpu.calibrate_gyro()
+
+# Global variables for yaw calculation
+yaw_angle = 0.0
+last_time = ticks_ms()
 
 # Ultrasonic sensor
 trig = Pin(19, Pin.OUT)
@@ -141,26 +187,32 @@ pin_a1.irq(trigger=Pin.IRQ_RISING | Pin.IRQ_FALLING, handler=update_position1)
 pin_a2.irq(trigger=Pin.IRQ_RISING | Pin.IRQ_FALLING, handler=update_position2)
 
 # ----- Line Following Specific Paramters ---
-KP = 150
+KP = 100
 MAX_CORRECTION = 200
 
 # ----- Line Following Control Loop -----
 def run_line_follower():
+    global yaw_angle, last_time # Declare global to modify
     try:
         while True:
             # MPU6050
-            gx, gy, gz = mpu.get_gyro()
+            # accel = mpu.get_accel() # Not used for yaw, so commenting out
+            gyro = mpu.get_gyro()
+            
+            # Integrate gyro z to estimate yaw angle
+            current_time = ticks_ms()
+            dt = (current_time - last_time) / 1000.0
+            last_time = current_time
+
+            yaw_angle += gyro['z'] * dt  # degrees
             
             # Ultrasonic distance
-            try:
-                dist = read_distnace(trig, echo)
-            except:
-                dist = -1
+            dist = read_distance(trig, echo)
             
             # Button state
             button_pressed = button.value() == 1
             
-            # Activate electromanget
+            # Activate electromagnet
             if button.value() == 0:
                 electromagnet.off()
             else:
@@ -174,17 +226,17 @@ def run_line_follower():
             weighted_sum = 0
 
             for i, sensor_value in enumerate(ir_values):
-                if sensor_value == 0:
+                if sensor_value == 0: # Assuming 0 means line detected (dark line on light background)
                     weighted_sum += weights[i]
                     num_active_sensors += 1
 
             if num_active_sensors > 0:
                 error = weighted_sum / num_active_sensors
             else:
-                    stop_motors()
-                    print("Line lost! Stopping.")
-                    sleep_ms(500)
-                    continue
+                stop_motors()
+                print("Line lost! Stopping.")
+                sleep_ms(500)
+                continue
 
             correction = int(error * KP)
 
@@ -204,11 +256,11 @@ def run_line_follower():
             print(f"Left Speed: {left_speed}, Right Speed: {right_speed}")
             print("Encoder 1 Count:", position1)
             print("Encoder 2 Count:", position2)
-            print("Distance: {:.2f} cm".format(dist) if dist != -1 else "Ultrasonic: Error")
+            print("Distance: {:.2f} cm".format(dist) if dist != -1 else "Ultrasonic: Timeout")
             print("Button Pressed:", button_pressed)
-            print("Gyro : gx={:.2f}, gy={:.2f}, gz={:.2f}".format(gx, gy, gz))
+            print("Yaw angle (deg): {:.2f}".format(yaw_angle))
             
-            sleep_ms(200)
+            sleep_ms(100)
 
     except KeyboardInterrupt:
         print("Program interrupted by user.")
@@ -218,4 +270,3 @@ def run_line_follower():
 
 # Start the line following loop
 run_line_follower()
-
