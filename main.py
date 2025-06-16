@@ -42,7 +42,6 @@ class MPU6050:
         return value
 
     # We will no longer call get_accel(), but keeping it here is harmless
-    # if you decide to use it later, or you can remove it entirely.
     def get_accel(self):
         ax = self.read_raw(0x3B) / 16384.0
         ay = self.read_raw(0x3D) / 16384.0
@@ -141,7 +140,7 @@ def run_cart():
 
         while True:
             # MPU6050 Gyroscope only
-            # ax, ay, az = mpu.get_accel() # Removed this line
+            # ax, ay, az = mpu.get_accel()
             gx, gy, gz = mpu.get_gyro()
 
             # Ultrasonic distance
