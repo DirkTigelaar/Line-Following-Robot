@@ -1,7 +1,7 @@
 # THIS CODE READS ALL THE SENSOR VALUES
 # LINE FOLLOWING BAHAVIOUR
 
-from machine import Pin, I2C
+from machine import Pin, I2C, PWM
 from time import sleep_us, sleep_ms, ticks_us, ticks_diff
 
 # --- Motor Control Setup ---
@@ -148,6 +148,24 @@ MAX_CORRECTION = 200
 def run_line_follower():
     try:
         while True:
+            # MPU6050
+            gx, gy, gz = mpu.get_gyro()
+            
+            # Ultrasonic distance
+            try:
+                dist = read_distnace(trig, echo)
+            except:
+                dist = -1
+            
+            # Button state
+            button_pressed = button.value() == 1
+            
+            # Activate electromanget
+            if button.value() == 0:
+                electromagnet.off()
+            else:
+                electromagnet.on()
+            
             ir_values = [pin.value() for pin in ir_pins]
             error = 0
             weights = [-2, -1, 0, 1, 2]
@@ -186,13 +204,11 @@ def run_line_follower():
             print(f"Left Speed: {left_speed}, Right Speed: {right_speed}")
             print("Encoder 1 Count:", position1)
             print("Encoder 2 Count:", position2)
-            try:
-                 dist = read_distance(trig, echo)
-            except:
-                 dist = -1
             print("Distance: {:.2f} cm".format(dist) if dist != -1 else "Ultrasonic: Error")
-
-            sleep_ms(50)
+            print("Button Pressed:", button_pressed)
+            print("Gyro : gx={:.2f}, gy={:.2f}, gz={:.2f}".format(gx, gy, gz))
+            
+            sleep_ms(200)
 
     except KeyboardInterrupt:
         print("Program interrupted by user.")
@@ -202,3 +218,4 @@ def run_line_follower():
 
 # Start the line following loop
 run_line_follower()
+
