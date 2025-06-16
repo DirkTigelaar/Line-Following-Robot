@@ -1,4 +1,5 @@
 # THIS CODE READS ALL THE SENSOR VALUES WHILST DRIVING THE CART FORWARDS
+# REMOVED ACCELERATION READINGS
 
 from machine import Pin, I2C
 from time import sleep_us, sleep_ms, ticks_us, ticks_diff
