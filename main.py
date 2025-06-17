@@ -4,6 +4,79 @@
 from machine import Pin, I2C, PWM
 from time import sleep_us, sleep_ms, ticks_us, ticks_diff, sleep, ticks_ms
 from math import atan2, sqrt, cos, pi
+import heapq
+
+# ----- Path Finding -----
+weighted_grid = {
+    # Parking spots (P nodes)
+    "P1": {"S": ("A1", 2.0)},
+    "P2": {"S": ("A2", 2.0)},
+    "P3": {"S": ("A3", 2.0)},
+    "P4": {"S": ("A4", 2.0)},
+    "P5": {"N": ("E3", 2.0)},
+    "P6": {"N": ("E4", 2.0)},
+    "P7": {"N": ("E5", 2.0)},
+    "P8": {"N": ("E6", 2.0)},
+
+    # A row
+    "A1": {"N": ("P1", 2.0), "E": ("A2", 1.0), "S": ("C1", 2.5)},
+    "A2": {"N": ("P2", 2.0), "E": ("A3", 1.0), "W": ("A1", 1.0)},
+    "A3": {"N": ("P3", 2.0), "E": ("A4", 1.0), "W": ("A2", 1.0)},
+    "A4": {"N": ("P4", 2.0), "E": ("A5", 1.0), "W": ("A3", 1.0)},
+    "A5": {"N": None, "E": ("A6", 4.0), "S": ("B1", 1.0), "W": ("A4", 1.0)},
+    "A6": {"N": None, "E": None, "S": ("B2", 1.5), "W": ("A5", 4.0)},
+
+    # B row
+    "B1": {"N": ("A5", 1.5), "E": ("B2", 4), "S": ("C2", 1.0)},
+    "B2": {"N": ("A6", 1.5), "E": None, "S": ("C3", 1.0), "W": ("B1", 4.0)},
+
+    # C row
+    "C1": {"N": ("A1", 2.5), "E": ("C2", 4.0), "S": ("D1", 1.0)},
+    "C2": {"N": ("B1", 1.0), "E": ("C3", 4.0), "S": ("D2", 1.0), "W": ("C1", 4.0)},
+    "C3": {"N": ("B2", 1.0), "E": None, "S": ("E6", 2.5), "W": ("C2", 4.0)},
+
+    # D row
+    "D1": {"N": ("C1", 1.0), "E": ("D2", 4.0), "S": ("E1", 1.5)},
+    "D2": {"N": ("C2", 1.0), "E": None, "S": ("E2", 1.5), "W": ("D1", 4.0)},
+
+    # E row
+    "E1": {"N": ("D1", 1.5), "E": ("E2", 4.0), "S": None, "W": None},
+    "E2": {"N": ("D2", 1.5), "E": ("E3", 1.0), "S": None, "W": ("E1", 4.0)},
+    "E3": {"S": ("P5", 2.0), "E": ("E4", 1.0), "N": None, "W": ("E2", 1.0)},
+    "E4": {"S": ("P6", 2.0), "E": ("E5", 1.0), "N": None, "W": ("E3", 1.0)},
+    "E5": {"S": ("P7", 2.0), "E": ("E6", 1.0), "N": None, "W": ("E4", 1.0)},
+    "E6": {"N": ("C3", 2.5), "E": None, "S": ("P8", 2.0), "W": ("E5", 1.0)},
+}
+
+def find_path_dijkstra(graph, start, goal):
+    dist = {node: float('inf') for node in graph} # Keeps track of the shortest distance from the start node to all other nodes.
+    dist[start] = 0
+    
+    prev = {node: None for node in graph} # Stores the predecessor node in the shortest path found so far.
+    
+    priority_queue = [(0, start)] # A min-heap to store (distance, node) tuples.
+    
+    while priority_queue:
+        current_dist, current_node = heapq.heappop(priority_queue)
+        if current_dist > dist[current_node]:
+            continue
+        if current_node == goal:
+            path = []
+            while current_node is not None:
+                path.insert(0, current_node)
+                current_node = prev[current_node]
+            return path
+        
+        for direction, neighbor_info in graph[current_node].items():
+            if neighbor_info is not None:
+                neighbor_node, weight = neighbor_info
+                new_dist = current_dist + weight
+                if new_dist < dist[neighbor_node]:
+                    dist[neighbor_node] = new_dist  # Update the shortest distance.
+                    prev[neighbor_node] = current_node  # Set current_node as its predecessor.
+                    heapq.heappush(priority_queue, (new_dist, neighbor_node)) # Add to priority queue.
+    return None
+
 
 # --- Motor Control Setup ---
 # L9110S Motor Driver Pins
@@ -476,5 +549,19 @@ def run_robot_control():
         stop_motors()
         # print("Motors stopped.")
 
+# ----- Path finding example -----
+start_node = "C1"
+goal_node = "C3"
+
+print(f"Calculating shortest path from {start_node} to {goal_node}...")
+shortest_path = find_path_dijkstra(weighted_grid, start_node, goal_node)
+
+if shortest_path:
+    print(f"Shortest path found: {shortest_path}")
+else:
+    print(f"No path found from {start_node} to {goal_node}.")
+
+
+
 # Start the robot control loop
-run_robot_control()
+# run_robot_control()
