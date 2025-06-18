@@ -1,5 +1,5 @@
 # THIS CODE READS ALL THE SENSOR VALUES
-# LINE FOLLOWING BEHAVIOUR WITH NODE DETECTION
+# LINE FOLLOWING BEHAVIOUR WITH NODE DETECTION AND DIJKSTRA PATH FOLLOWING
 
 from machine import Pin, I2C, PWM
 from time import sleep_us, sleep_ms, ticks_us, ticks_diff, sleep, ticks_ms
@@ -48,34 +48,98 @@ weighted_grid = {
     "E6": {"N": ("C3", 2.5), "E": None, "S": ("P8", 2.0), "W": ("E5", 1.0)},
 }
 
+# Node coordinates and initial robot orientation (facing North at C1)
+# Assumed grid layout where North is positive Y, East is positive X
+node_coords = {
+    "P1": (0, 7), "P2": (1, 7), "P3": (2, 7), "P4": (3, 7),
+    "A1": (0, 6), "A2": (1, 6), "A3": (2, 6), "A4": (3, 6), "A5": (4, 6), "A6": (8, 6),
+    "B1": (4, 5), "B2": (8, 5),
+    "C1": (0, 4), "C2": (4, 4), "C3": (8, 4),
+    "D1": (0, 3), "D2": (4, 3),
+    "E1": (0, 2), "E2": (4, 2), "E3": (5, 2), "E4": (6, 2), "E5": (7, 2), "E6": (8, 2),
+    "P5": (5, 0), "P6": (6, 0), "P7": (7, 0), "P8": (8, 0)
+}
+
+# Mapping direction strings to yaw changes in radians (assuming initial facing North = 0 radians)
+# North (N) = 0 radians
+# East (E) = pi/2 radians (90 degrees)
+# South (S) = pi radians (180 degrees)
+# West (W) = -pi/2 radians (-90 degrees)
+direction_to_yaw_change = {
+    "N": 0,
+    "E": pi / 2,
+    "S": pi,
+    "W": -pi / 2
+}
+
 def find_path_dijkstra(graph, start, goal):
-    dist = {node: float('inf') for node in graph} # Keeps track of the shortest distance from the start node to all other nodes.
+    dist = {node: float('inf') for node in graph}
     dist[start] = 0
-    
-    prev = {node: None for node in graph} # Stores the predecessor node in the shortest path found so far.
-    
-    priority_queue = [(0, start)] # A min-heap to store (distance, node) tuples.
-    
+
+    prev = {node: None for node in graph}
+    # Stores (distance, node, direction_to_get_here)
+    priority_queue = [(0, start, None)]
+
     while priority_queue:
-        current_dist, current_node = heapq.heappop(priority_queue)
+        current_dist, current_node, dir_to_here = heapq.heappop(priority_queue)
+
         if current_dist > dist[current_node]:
             continue
         if current_node == goal:
             path = []
-            while current_node is not None:
-                path.insert(0, current_node)
-                current_node = prev[current_node]
-            return path
+            current = goal
+            while current is not None:
+                path.insert(0, (current, prev[current]['direction'] if prev[current] else None))
+                current = prev[current]['node'] if prev[current] else None
+            # The first element will have None for direction, remove it or handle
+            return path[1:] if path else [] # Return (node, direction_to_next_node)
         
         for direction, neighbor_info in graph[current_node].items():
             if neighbor_info is not None:
                 neighbor_node, weight = neighbor_info
                 new_dist = current_dist + weight
                 if new_dist < dist[neighbor_node]:
-                    dist[neighbor_node] = new_dist  # Update the shortest distance.
-                    prev[neighbor_node] = current_node  # Set current_node as its predecessor.
-                    heapq.heappush(priority_queue, (new_dist, neighbor_node)) # Add to priority queue.
+                    dist[neighbor_node] = new_dist
+                    prev[neighbor_node] = {'node': current_node, 'direction': direction}
+                    heapq.heappush(priority_queue, (new_dist, neighbor_node, direction))
     return None
+
+def get_bearing_to_next_node(current_node_id, next_node_id, current_orientation_rad):
+    """
+    Calculates the target yaw angle (in radians) the robot needs to face to go
+    from current_node_id to next_node_id.
+
+    Args:
+        current_node_id (str): The ID of the current node.
+        next_node_id (str): The ID of the next node in the path.
+        current_orientation_rad (float): The robot's current yaw angle in radians.
+
+    Returns:
+        float: The target yaw angle in radians.
+    """
+    if current_node_id not in node_coords or next_node_id not in node_coords:
+        print(f"Error: Node coordinates not found for {current_node_id} or {next_node_id}")
+        return current_orientation_rad # Remain at current orientation
+
+    x1, y1 = node_coords[current_node_id]
+    x2, y2 = node_coords[next_node_id]
+
+    dx = x2 - x1
+    dy = y2 - y1
+
+    # Debugging print for dx, dy
+    print(f"  get_bearing_to_next_node: From {current_node_id} ({x1},{y1}) to {next_node_id} ({x2},{y2})")
+    print(f"  Calculated dx: {dx}, dy: {dy}")
+
+    # Calculate target angle using atan2(dy, dx) - standard mathematical angle
+    # Where 0 is positive x-axis (East), pi/2 is positive y-axis (North)
+    raw_target_angle = atan2(dy, dx)
+    
+    # Convert from (East=0, North=pi/2) to your convention (North=0, East=pi/2)
+    # Target yaw will be pi/2 - raw_target_angle
+    target_yaw_rad = pi/2 - raw_target_angle
+    
+    return normalize_angle_rad(target_yaw_rad)
 
 
 # --- Motor Control Setup ---
@@ -96,14 +160,15 @@ BASE_SPEED = 350
 MAX_SPEED_PWM = 1023 # Max PWM duty cycle
 
 def set_motor_speed(motor_pwm_obj, motor_in2_pin_obj, speed):
-    # Ensure speed is within PWM range [0, 1023]
-    speed = max(0, min(int(speed), MAX_SPEED_PWM))
+    # Ensure speed is within PWM range [-1023, 1023]
+    # Positive speed for forward, negative for backward
+    
     if speed >= 0: # Forward
-        motor_in2_pin_obj.value(0)
-        motor_pwm_obj.duty(speed)
-    else: # Backward (though not typically used in line following forward-only)
-        motor_in2_pin_obj.value(1)
-        motor_pwm_obj.duty(speed) # abs(speed) should be handled by max(0, min(int(speed), MAX_SPEED_PWM))
+        motor_in2_pin_obj.value(0) # IN2 low for forward
+        motor_pwm_obj.duty(min(int(speed), MAX_SPEED_PWM))
+    else: # Backward
+        motor_in2_pin_obj.value(1) # IN2 high for backward
+        motor_pwm_obj.duty(min(int(abs(speed)), MAX_SPEED_PWM))
 
 def stop_motors():
     motor1_pwm.duty(0)
@@ -153,7 +218,7 @@ class MPU6050:
         }
 
     def calibrate_gyro(self, samples=100):
-        # print("Calibrating gyro... hold still")
+        print("Calibrating gyro... hold still")
         sum_x = sum_y = sum_z = 0
         for _ in range(samples):
             gx, gy, gz = self._read_raw_data(0x43)
@@ -166,7 +231,7 @@ class MPU6050:
             'y': sum_y / samples,
             'z': sum_z / samples
         }
-        # print("Gyro calibration complete.")
+        print("Gyro calibration complete.")
 
 # ----- Ultrasonic Sensor -----
 def read_distance(trig, echo):
@@ -201,7 +266,7 @@ mpu = MPU6050(i2c)
 mpu.calibrate_gyro()
 
 # Global variables for yaw calculation (from MPU6050)
-yaw_angle = 0.0 # Radians
+yaw_angle = pi / 2 # Radians. Robot starts facing East (90 degrees) based on your convention (North=0, East=pi/2)
 last_mpu_time = ticks_ms()
 
 # Ultrasonic sensor
@@ -277,6 +342,8 @@ no_intersection_counter = 0
 intersection_processed = False
 turn_target_yaw = 0.0 # Target yaw angle in radians for turns
 line_search_counter = 0
+path_index = 0 # To track current position in the planned path
+planned_path = [] # Stores the sequence of (node, direction_to_get_here) from Dijkstra
 
 # --- Helper functions for state machine ---
 
@@ -295,30 +362,19 @@ def detect_intersection(ir_values):
     A true intersection means multiple (e.g., three or more) central sensors
     are on the line (value 0).
     """
-    # For a 5-sensor array, a common robust intersection detection:
-    # All three central sensors (Left, Center, Right) detect the line.
-    # ir_values[1] (Left), ir_values[2] (Center), ir_values[3] (Right)
-    # Or, for very wide intersections, check if more than 3 sensors are on the line.
-    
-    # Let's use the stricter approach from thonny_explained_dirk for "multiple active sensors"
-    # Assuming 0 means line detected, 1 means no line.
     line_center = ir_values[2] == 0
     line_left = ir_values[1] == 0
     line_right = ir_values[3] == 0
     line_far_left = ir_values[0] == 0
     line_far_right = ir_values[4] == 0
 
-    # A good intersection detection for a 5-sensor array might be:
-    # If the center sensor AND at least one sensor on each side (left/right) detect the line.
-    # This pattern indicates a crossroad or T-junction.
-    # This is more robust than just checking all 5, which might be too strict for some turns.
-    
-    # Option 1: Center and both immediate neighbors detect line
-    if line_center and line_left and line_right:
+    # A robust intersection detection: if the center sensor and at least
+    # one sensor on each side (left/right) detect the line.
+    if line_center and (line_left or line_far_left) and (line_right or line_far_right):
         return True
     
-    # Option 2: All 5 sensors detect line (very clear intersection)
-    if line_far_left and line_left and line_center and line_right and line_far_right:
+    # Also consider if all 5 sensors are on the line (very clear intersection)
+    if all(s == 0 for s in ir_values):
         return True
 
     return False
@@ -354,56 +410,56 @@ def execute_turn(current_yaw, target_yaw, base_speed, max_speed_val):
     heading_error = target_yaw - current_yaw
     heading_error = normalize_angle_rad(heading_error) # Normalize error to [-pi, pi]
 
-    turn_tolerance = 0.05 # Radians (approx 2.8 degrees)
+    turn_tolerance = 0.05 # Radians (approx 3 degrees) - Made stricter for better precision
 
+    # Check for turn completion first
     if abs(heading_error) < turn_tolerance:
         return 0, 0, True # Turn complete
 
-    turn_kp = 1.0 # Proportional gain for turning speed
+    turn_kp = 1500.0 # Proportional gain for turning speed - Adjusted to be more aggressive for turning
     
-    # Calculate base turn speed proportional to the error
-    raw_turn_speed = turn_kp * heading_error
+    raw_turn_speed = turn_kp * abs(heading_error) # Calculate speed based on absolute error
 
-    # Max turn speed
-    max_abs_turn_speed = base_speed * 1.5 # Can turn faster than base speed
-    # Min turn speed to ensure it actually moves when error is small
-    min_abs_turn_speed = base_speed * 0.2
+    max_abs_turn_speed = max_speed_val 
+    min_abs_turn_speed_threshold = base_speed * 0.5 
 
-    # Apply limits
-    # Cap the absolute raw_turn_speed to max_abs_turn_speed, then ensure it's at least min_abs_turn_speed if non-zero
-    turn_speed = max(min_abs_turn_speed, min(max_abs_turn_speed, abs(raw_turn_speed)))
+    turn_speed = raw_turn_speed
+    if turn_speed < min_abs_turn_speed_threshold:
+        turn_speed = min_abs_turn_speed_threshold
+    
+    turn_speed = min(turn_speed, max_abs_turn_speed)
 
-    # Determine direction
-    if heading_error > 0:  # Turn left (increase yaw)
-        left_speed_val = -turn_speed
+    # Determine direction of turn and set motor speeds
+    # If heading_error is positive, target_yaw is "ahead" (counter-clockwise)
+    # If heading_error is negative, target_yaw is "behind" (clockwise)
+    if heading_error > 0:  # Robot needs to turn counter-clockwise (increase yaw)
+        # Left wheel backward, Right wheel forward (differential turn)
+        left_speed_val = -turn_speed 
         right_speed_val = turn_speed
-    else:  # Turn right (decrease yaw)
+    else:  # Robot needs to turn clockwise (decrease yaw)
+        # Left wheel forward, Right wheel backward (differential turn)
         left_speed_val = turn_speed
         right_speed_val = -turn_speed
-        
-    # Translate speeds to PWM values. Assuming set_motor_speed handles positive PWM only.
-    # A negative speed here means reverse, which we typically don't want for turning in place.
-    # For turning in place, one wheel goes forward, one backward.
-    # Let's simplify this for current motor control which uses 0/1 on IN2 for direction.
-    # It's better to calculate differential drive based on target speeds.
-    
-    # For turning, one motor forward, one backward, or differential.
-    # Here, we'll assume `set_motor_speed` takes a signed speed (0-1023 for forward, -(0-1023) for backward)
-    # The current `set_motor_speed` function supports this.
-    
+            
     return left_speed_val, right_speed_val, False # Turn not complete
 
+
 # ----- Main Control Loop -----
-def run_robot_control():
+def run_robot_control(start_node, goal_node):
     global yaw_angle, last_mpu_time
     global current_state, intersection_counter, no_intersection_counter, intersection_processed, turn_target_yaw, line_search_counter
+    global planned_path, path_index
+
+    # Plan the path using Dijkstra
+    path_with_directions = find_path_dijkstra(weighted_grid, start_node, goal_node)
+    if path_with_directions:
+        planned_path = path_with_directions
+        print(f"Planned path: {planned_path}")
+    else:
+        print(f"No path found from {start_node} to {goal_node}. Stopping.")
+        current_state = 'stopping' # Can't proceed without a path
 
     try:
-        # Initial path (placeholder, as there's no path planning logic here yet)
-        # In a full system, this would be computed by Dijkstra's.
-        # For this example, we assume it's just line following with node detection.
-        # If you were to add path planning, this is where 'self.path' would be initialized.
-
         while True:
             # --- Sensor Readings ---
             current_mpu_time = ticks_ms()
@@ -411,18 +467,19 @@ def run_robot_control():
             last_mpu_time = current_mpu_time
 
             gyro = mpu.get_gyro()
-            yaw_angle += gyro['z'] * dt_mpu * (pi / 180.0) # Integrate gyro Z to estimate yaw angle (convert deg/s to rad/s)
+            # Integrate gyro Z to estimate yaw angle (convert deg/s to rad/s)
+            yaw_angle += gyro['z'] * dt_mpu * (pi / 180.0) 
             yaw_angle = normalize_angle_rad(yaw_angle) # Keep yaw within [-pi, pi]
 
             dist = read_distance(trig, echo)
-            button_pressed = button.value() == 1
+            button_pressed = button.value() == 0 # Button is pulled up, so 0 when pressed
             ir_values = [pin.value() for pin in ir_pins]
             
             # Activate electromagnet based on button state
-            if button.value() == 0: # Button not pressed (pulled up, so 0 when pressed)
-                electromagnet.off()
-            else: # Button pressed (or floating/noise, assuming pull-up means 0 is pressed)
+            if button_pressed:
                 electromagnet.on()
+            else:
+                electromagnet.off()
 
             # --- State Machine Logic ---
             left_speed = 0
@@ -430,17 +487,50 @@ def run_robot_control():
             
             # State: Line Following
             if current_state == 'line_following':
+                if path_index >= len(planned_path): # Check if path is completed (or nearing completion)
+                    print("Path completed! Transitioning to stopping.")
+                    current_state = 'stopping'
+                    continue
+
                 if detect_intersection(ir_values): # If an intersection is detected
                     intersection_counter += 1
                     no_intersection_counter = 0 # Reset no-intersection counter
                     
-                    if intersection_counter >= 3 and not intersection_processed: # Debounce: must detect for 3 cycles
-                        print("Node detected! Transitioning to at_intersection.")
+                    # Debounce: must detect for 3 cycles and not already processed
+                    if intersection_counter >= 3 and not intersection_processed: 
+                        # Get the node ID from the current planned_path entry. This is the node the robot just arrived at.
+                        # The path_index points to the *segment* from current_node to next_node.
+                        # So, planned_path[path_index] is (next_node, direction_to_get_there_from_previous_node).
+                        # The node we just arrived at is implicitly the 'previous' node of the current segment.
+                        # A better way to track current node might be to have a separate 'current_robot_node' variable.
+                        # For now, let's assume planned_path[path_index][0] is the *next* node we are heading towards.
+                        # This means when we detect an intersection, we have arrived at the node that *was* the next_node.
+                        
+                        # Let's re-think this: when path_index is 0, planned_path[0] is (first_node_after_start, direction).
+                        # When we hit the first intersection, we are at `start_node` and need to go to `planned_path[0][0]`.
+                        # So, if we are at an intersection, the node we *just arrived at* is the one that was `planned_path[path_index-1][0]`
+                        # if path_index > 0.
+                        # Or, even simpler: if we are at an intersection, and we are about to make a decision,
+                        # the node we are AT is the `source` for the next path segment.
+                        # So, when entering `at_intersection` state, the node we are *at* is the one *before* planned_path[path_index][0].
+
+                        # This logic needs refinement. A simple approach:
+                        # planned_path[path_index] = (node_we_are_GOING_TO, direction_to_get_there)
+                        # So, when we hit an intersection, we have ARRIVED at planned_path[path_index][0].
+                        
+                        # Let's use the explicit `current_node_id_in_path` logic used in the `at_intersection` state.
+                        # At this point, if path_index is `X`, it means we are driving along the segment
+                        # which will lead us *to* the node that is `planned_path[X][0]`.
+                        # So, the node we are about to process (turn at/pass through) is `planned_path[path_index][0]`.
+                        
+                        # For clearer node tracking, let's say the current node the robot *thinks* it is at.
+                        # This variable will be updated AFTER a turn or decision at an intersection.
+                        # We will make this explicit.
+                        
+                        print(f"Intersection detected! Preparing to process next segment.")
                         current_state = 'at_intersection'
                         intersection_processed = True
-                        # Set a drive-through duration (e.g., for X number of cycles)
-                        # This ensures the robot moves fully into the intersection.
-                        intersection_counter = 15 # Drive through for 15 cycles (approx 1.5 seconds at 100ms sleep)
+                        intersection_counter = 10 # Drive through for X cycles (adjust as needed)
                 else: # No intersection detected
                     no_intersection_counter += 1
                     if no_intersection_counter >= 2: # Reset if no intersection for 2 cycles
@@ -449,12 +539,12 @@ def run_robot_control():
 
                 error = calculate_line_error(ir_values)
                 if error is None: # Line lost
-                    # print("Line lost! Searching...")
-                    # Transition to a line search state or slow down significantly
+                    print("Line lost! Searching...")
+                    # Slow down and try to find the line
                     left_speed = BASE_SPEED * 0.3
                     right_speed = BASE_SPEED * 0.3
-                    # Or, more robustly, transition to 'post_turn_search' logic from thonny_explained_dirk.
-                    # For simplicity, keeping it moving slowly for now.
+                    # Potentially transition to a more aggressive line search state
+                    # For now, it just slows down. Could add a dedicated 'line_lost_search' state.
                 else:
                     correction = int(error * KP)
                     left_speed = BASE_SPEED - correction
@@ -466,102 +556,133 @@ def run_robot_control():
 
             # State: At Intersection (driving through)
             elif current_state == 'at_intersection':
-                # Drive slowly forward into the intersection
+                # Continue driving slowly into the intersection
                 left_speed = BASE_SPEED * 0.4
                 right_speed = BASE_SPEED * 0.4
                 
                 if intersection_counter > 0:
                     intersection_counter -= 1 # Decrement drive-through counter
                 else:
-                    # Drive-through complete, now decide next action (e.g., turn or continue straight)
-                    # For this simple line follower, let's assume it should attempt to find the line again.
-                    # In a path planning scenario, this is where you'd compute the next turn.
-                    print("Finished driving through intersection. Returning to line following or turning.")
-                    # For now, transition back to line following. In a full system, this would be 'turning'
-                    # or 'post_turn_search' if a specific turn angle is required.
-                    current_state = 'line_following'
-                    # Or, for a specific turn, you'd set turn_target_yaw here and transition to 'turning'
-                    # Example: turn_target_yaw = normalize_angle_rad(yaw_angle + pi/2) # 90 degree left
-                    # current_state = 'turning'
+                    # Drive-through complete, now determine next action based on path
+                    
+                    # The current_node_id represents the node the robot has just arrived at.
+                    # If path_index is 0, we are at start_node, and planning to go to planned_path[0][0].
+                    # If path_index > 0, we have just completed the segment that led to planned_path[path_index-1][0].
+                    # So, the current node we are "at" is the node from the *previous* path segment,
+                    # or the start_node if it's the very beginning.
 
-            # State: Turning (if we had specific turning logic)
-            # You would enter this state from 'at_intersection' if a turn is needed
-            # elif current_state == 'turning':
-            #     ls, rs, complete = execute_turn(yaw_angle, turn_target_yaw, BASE_SPEED, MAX_SPEED_PWM)
-            #     left_speed = ls
-            #     right_speed = rs
-            #     if complete:
-            #         # print("Turn complete. Searching for line.")
-            #         current_state = 'post_turn_search'
-            #         line_search_counter = 0
+                    # Let's define the current_node_for_logic clearly:
+                    current_node_for_logic = start_node if path_index == 0 else planned_path[path_index-1][0]
+                    
+                    # If this is the last step in the planned_path, then current_node_for_logic is our goal.
+                    # Check if the *next* segment would take us beyond the planned path.
+                    if path_index >= len(planned_path):
+                        print(f"Reached final destination: {current_node_for_logic}. Stopping.")
+                        current_state = 'stopping'
+                        continue
+
+                    # The next node in the sequence is `planned_path[path_index][0]`
+                    next_node_id_in_path, _ = planned_path[path_index]
+
+                    # Now, find the direction from current_node_for_logic to next_node_id_in_path
+                    direction_to_take = None
+                    for direction, neighbor_info in weighted_grid[current_node_for_logic].items():
+                        if neighbor_info and neighbor_info[0] == next_node_id_in_path:
+                            direction_to_take = direction
+                            break
+                    
+                    if direction_to_take is None:
+                        print(f"Error: Could not determine direction from {current_node_for_logic} to {next_node_id_in_path}. Stopping.")
+                        current_state = 'stopping'
+                        continue
+
+                    print(f"Finished driving through node {current_node_for_logic}. Next node in path: {next_node_id_in_path}. Direction to take: {direction_to_take}")
+                    
+                    # Calculate target yaw for the next segment using coordinates
+                    turn_target_yaw = get_bearing_to_next_node(current_node_for_logic, next_node_id_in_path, yaw_angle)
+                    
+                    print(f"Current Yaw: {yaw_angle * 180/pi:.2f} deg, Target Yaw: {turn_target_yaw * 180/pi:.2f} deg")
+                    current_state = 'turning'
+                    
+                    # IMPORTANT: Increment path_index *after* we've used the current segment's info
+                    # for the turn. This path_index now points to the segment *after* the turn.
+                    path_index += 1
+
+
+            # State: Turning
+            elif current_state == 'turning':
+                ls, rs, complete = execute_turn(yaw_angle, turn_target_yaw, BASE_SPEED, MAX_SPEED_PWM)
+                left_speed = ls
+                right_speed = rs
+
+                # Debugging print for turning state
+                error_deg = normalize_angle_rad(turn_target_yaw - yaw_angle) * (180.0 / pi)
+                print(f"  Turning... Heading Error (deg): {error_deg:.2f}")
+
+                if complete:
+                    print(f"Turn complete. Current Yaw: {yaw_angle * 180/pi:.2f} deg. Searching for line.")
+                    current_state = 'post_turn_search'
+                    line_search_counter = 0 # Reset search counter
 
             # State: Post Turn Search (if turn fails to land on line)
-            # elif current_state == 'post_turn_search':
-            #     error = calculate_line_error(ir_values)
-            #     if error is not None: # Line detected after search
-            #         # print("Line found after search. Resuming line following.")
-            #         current_state = 'line_following'
-            #         left_speed, right_speed = BASE_SPEED, BASE_SPEED # Start strong on line
-            #     else:
-            #         line_search_counter += 1
-            #         if line_search_counter < 30: # Max search duration
-            #             # Simple search pattern: oscillate
-            #             search_speed = BASE_SPEED * 0.3
-            #             if (line_search_counter // 5) % 2 == 0:
-            #                 left_speed, right_speed = search_speed * 0.8, search_speed * 1.2 # Turn right
-            #             else:
-            #                 left_speed, right_speed = search_speed * 1.2, search_speed * 0.8 # Turn left
-            #         else:
-            #             # print("Line not found after extensive search. Stopping.")
-            #             current_state = 'stopping' # Give up and stop
+            elif current_state == 'post_turn_search':
+                error = calculate_line_error(ir_values)
+                if error is not None: # Line detected after search
+                    print("Line found after search. Resuming line following.")
+                    current_state = 'line_following'
+                    left_speed, right_speed = BASE_SPEED, BASE_SPEED # Start strong on line
+                else:
+                    line_search_counter += 1
+                    if line_search_counter < 50: # Max search duration (adjust based on robot speed and environment)
+                        # Simple search pattern: oscillate
+                        search_speed = BASE_SPEED * 0.3
+                        # Alternate turning left and right to find the line
+                        if (line_search_counter % 20) < 10: # Turn one way for 10 cycles
+                             left_speed, right_speed = search_speed * 0.5, search_speed * 1.5 # Turn right
+                        else: # Turn other way for 10 cycles
+                            left_speed, right_speed = search_speed * 1.5, search_speed * 0.5 # Turn left
+                    else:
+                        print("Line not found after extensive search. Stopping.")
+                        current_state = 'stopping' # Give up and stop
 
             # State: Stopping
             elif current_state == 'stopping':
                 stop_motors()
                 print("Robot is in STOPPING state.")
-                # Could break here if it's a final stop for mission complete
-                # For now, it will just continuously print stopping and keep motors off.
-                sleep_ms(500) # Sleep to prevent rapid print/looping for stopped state
-                continue # Skip remaining loop if stopped
-
+                break # Exit the while loop
+            
             set_motor_speed(motor1_pwm, motor1_in2_pin, left_speed)
             set_motor_speed(motor2_pwm, motor2_in2_pin, right_speed)
 
             # --- Debugging Output ---
-            # print("\n--- Robot State: {} ---".format(current_state))
-            # print("IR Sensors:", ir_values)
-            # print("Intersection Counter:", intersection_counter)
-            # print("No Intersection Counter:", no_intersection_counter)
-            # print("Intersection Processed:", intersection_processed)
-            # print(f"Left Speed: {left_speed}, Right Speed: {right_speed}")
+            print(f"\n--- Robot State: {current_state} ---")
+            print("IR Sensors:", ir_values)
+            print(f"Left Speed: {left_speed}, Right Speed: {right_speed}")
+            print(f"Yaw angle (deg): {yaw_angle * (180.0 / pi):.2f}")
+            if current_state == 'turning':
+                print(f"Target Yaw (deg): {turn_target_yaw * (180.0 / pi):.2f}")
             # print("Encoder 1 Count:", position1)
             # print("Encoder 2 Count:", position2)
             # print("Distance: {:.2f} cm".format(dist) if dist != -1 else "Ultrasonic: Timeout")
             # print("Button Pressed:", button_pressed)
-            # print("Yaw angle (deg): {:.2f}".format(yaw_angle * (180.0 / pi)))
             
-            sleep_ms(100) # Control loop frequency
+            sleep_ms(50) # Control loop frequency
 
     except KeyboardInterrupt:
-        # print("Program interrupted by user.")
-        pass # To prevent the message if user specifically wants only node detection prints
+        print("Program interrupted by user.")
     finally:
         stop_motors()
-        # print("Motors stopped.")
+        print("Motors stopped.")
 
-# ----- Path finding example -----
+# ----- Path finding example and robot run -----
 start_node = "C1"
-goal_node = "C3"
+goal_node = "B2" # Example goal node
 
 print(f"Calculating shortest path from {start_node} to {goal_node}...")
-shortest_path = find_path_dijkstra(weighted_grid, start_node, goal_node)
-
-if shortest_path:
-    print(f"Shortest path found: {shortest_path}")
-else:
-    print(f"No path found from {start_node} to {goal_node}.")
-
-
+# The path is now calculated inside run_robot_control
+# and stored in the global planned_path variable.
 
 # Start the robot control loop
-# run_robot_control()
+run_robot_control(start_node, goal_node)
+
+
