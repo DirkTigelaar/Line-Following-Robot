@@ -1,4 +1,3 @@
-
 # THIS CODE READS ALL THE SENSOR VALUES
 # LINE FOLLOWING BEHAVIOUR WITH NODE DETECTION AND DIJKSTRA PATH FOLLOWING
 
@@ -49,8 +48,7 @@ weighted_grid = {
     "E6": {"N": ("C3", 2.5), "E": None, "S": ("P8", 2.0), "W": ("E5", 1.0)},
 }
 
-# Node coordinates and initial robot orientation (facing North at C1)
-# Assumed grid layout where North is positive Y, East is positive X
+# Node coordinates (no longer directly used for bearing calculation, but kept for reference)
 node_coords = {
     "P1": (0, 7), "P2": (1, 7), "P3": (2, 7), "P4": (3, 7),
     "A1": (0, 6), "A2": (1, 6), "A3": (2, 6), "A4": (3, 6), "A5": (4, 6), "A6": (8, 6),
@@ -61,16 +59,13 @@ node_coords = {
     "P5": (5, 0), "P6": (6, 0), "P7": (7, 0), "P8": (8, 0)
 }
 
-# Mapping direction strings to yaw changes in radians (assuming initial facing North = 0 radians)
-# North (N) = 0 radians
-# East (E) = pi/2 radians (90 degrees)
-# South (S) = pi radians (180 degrees)
-# West (W) = -pi/2 radians (-90 degrees)
+# Mapping direction strings to yaw changes in radians
+# Based on the user's provided values: North = pi/2, East = 0, South = -pi/2, West = pi
 direction_to_yaw_change = {
-    "N": 0,
-    "E": pi / 2,
-    "S": pi,
-    "W": -pi / 2
+    'N': 1.57079632679, # pi / 2
+    'E': 0.0,
+    'S': -1.57079632679, # -pi / 2
+    'W': 3.14159265359 # pi
 }
 
 def find_path_dijkstra(graph, start, goal):
@@ -105,42 +100,17 @@ def find_path_dijkstra(graph, start, goal):
                     heapq.heappush(priority_queue, (new_dist, neighbor_node, direction))
     return None
 
-def get_bearing_to_next_node(current_node_id, next_node_id, current_orientation_rad):
+# NEW FUNCTION: Get target yaw directly from cardinal direction string
+def get_target_yaw_from_direction(direction_str):
     """
-    Calculates the target yaw angle (in radians) the robot needs to face to go
-    from current_node_id to next_node_id.
-
-    Args:
-        current_node_id (str): The ID of the current node.
-        next_node_id (str): The ID of the next node in the path.
-        current_orientation_rad (float): The robot's current yaw angle in radians.
-
-    Returns:
-        float: The target yaw angle in radians.
+    Returns the absolute target yaw angle in radians for a given cardinal direction.
+    Uses the global direction_to_yaw_change mapping.
     """
-    if current_node_id not in node_coords or next_node_id not in node_coords:
-        print(f"Error: Node coordinates not found for {current_node_id} or {next_node_id}")
-        return current_orientation_rad # Remain at current orientation
-
-    x1, y1 = node_coords[current_node_id]
-    x2, y2 = node_coords[next_node_id]
-
-    dx = x2 - x1
-    dy = y2 - y1
-
-    # Debugging print for dx, dy
-    print(f"  get_bearing_to_next_node: From {current_node_id} ({x1},{y1}) to {next_node_id} ({x2},{y2})")
-    print(f"  Calculated dx: {dx}, dy: {dy}")
-
-    # Calculate target angle using atan2(dy, dx) - standard mathematical angle
-    # Where 0 is positive x-axis (East), pi/2 is positive y-axis (North)
-    raw_target_angle = atan2(dy, dx)
-    
-    # Convert from (East=0, North=pi/2) to your convention (North=0, East=pi/2)
-    # Target yaw will be pi/2 - raw_target_angle
-    target_yaw_rad = pi/2 - raw_target_angle
-    
-    return normalize_angle_rad(target_yaw_rad)
+    if direction_str in direction_to_yaw_change:
+        return normalize_angle_rad(direction_to_yaw_change[direction_str])
+    else:
+        print(f"Error: Invalid direction string '{direction_str}'. Returning 0.0.")
+        return 0.0 # Default to 0 or handle error appropriately
 
 
 # --- Motor Control Setup ---
@@ -215,7 +185,7 @@ class MPU6050:
         return {
             'x': (gx - ox) / 131.0, # Gyro sensitivity for +/- 2000 deg/s
             'y': (gy - oy) / 131.0,
-            'z': (gz - oz) / 131.0
+            'z': (gz - oz) / 131.0 # This is the Z-axis (yaw)
         }
 
     def calibrate_gyro(self, samples=100):
@@ -267,7 +237,8 @@ mpu = MPU6050(i2c)
 mpu.calibrate_gyro()
 
 # Global variables for yaw calculation (from MPU6050)
-yaw_angle = pi / 2 # Radians. Robot starts facing East (90 degrees) based on your convention (North=0, East=pi/2)
+# This will be set automatically at the start of run_robot_control
+yaw_angle = 0.0 # Initialized to 0.0, will be updated to actual start orientation
 last_mpu_time = ticks_ms()
 
 # Ultrasonic sensor
@@ -332,9 +303,7 @@ pin_a2.irq(trigger=Pin.IRQ_RISING | Pin.IRQ_FALLING, handler=update_position2)
 # ----- Line Following and Node Detection Parameters ---
 # PID gains for line following
 KP = 100 # Proportional gain for line following
-LINE_THRESHOLD = 0.5 # IR sensor threshold for line detection (assuming normalized 0-1 values if used)
-                     # For digital sensors (0 or 1), this is less relevant, but could be for analog.
-                     # Your current IRs are digital, so 0 is line, 1 is no line.
+LINE_THRESHOLD = 0.5 # IR sensor threshold (less relevant for digital sensors)
 
 # State machine variables
 current_state = 'line_following'
@@ -360,8 +329,8 @@ def detect_intersection(ir_values):
     """
     Detect intersection using IR line sensors.
     Assuming ir_values are ordered [FarLeft, Left, Center, Right, FarRight]
-    A true intersection means multiple (e.g., three or more) central sensors
-    are on the line (value 0).
+    A robust intersection detection: if the center sensor and at least
+    one sensor on each side (left/right) detect the line.
     """
     line_center = ir_values[2] == 0
     line_left = ir_values[1] == 0
@@ -369,8 +338,6 @@ def detect_intersection(ir_values):
     line_far_left = ir_values[0] == 0
     line_far_right = ir_values[4] == 0
 
-    # A robust intersection detection: if the center sensor and at least
-    # one sensor on each side (left/right) detect the line.
     if line_center and (line_left or line_far_left) and (line_right or line_far_right):
         return True
     
@@ -402,41 +369,45 @@ def calculate_line_error(ir_values):
 
 def execute_turn(current_yaw, target_yaw, base_speed, max_speed_val):
     """
-    Calculates motor speeds for the robot to turn towards a target yaw angle.
-    Returns left_speed, right_speed, and a boolean indicating if the turn is complete.
+    Execute a turn to reach the target yaw angle using proportional control.
+    Returns left_speed, right_speed, turn_complete flag.
     """
     current_yaw = normalize_angle_rad(current_yaw)
     target_yaw = normalize_angle_rad(target_yaw)
 
     heading_error = target_yaw - current_yaw
-    heading_error = normalize_angle_rad(heading_error) # Keep error within [-pi, pi]
+    heading_error = normalize_angle_rad(heading_error) # Normalize error to [-pi, pi]
 
-    turn_tolerance = 0.05 # Radians (approx 3 degrees)
+    turn_tolerance = 0.05 # Radians (approx 3 degrees) - Made stricter for better precision
 
+    # Check for turn completion first
     if abs(heading_error) < turn_tolerance:
         return 0, 0, True # Turn complete
 
-    turn_kp = 1500.0 # Proportional gain for turning speed
+    turn_kp = 1500.0 # Proportional gain for turning speed - Adjusted to be more aggressive for turning
     
-    raw_turn_speed = turn_kp * abs(heading_error)
+    raw_turn_speed = turn_kp * abs(heading_error) # Calculate speed based on absolute error
+
+    max_abs_turn_speed = max_speed_val 
     min_abs_turn_speed_threshold = base_speed * 0.5 
 
-    turn_speed = max(raw_turn_speed, min_abs_turn_speed_threshold)
-    turn_speed = min(turn_speed, max_speed_val)
+    turn_speed = raw_turn_speed
+    if turn_speed < min_abs_turn_speed_threshold:
+        turn_speed = min_abs_turn_speed_threshold
+    
+    turn_speed = min(turn_speed, max_abs_turn_speed)
 
-    # Determine motor directions based on heading error
-    # If heading_error is positive, target_yaw is "ahead" (e.g., from West to North)
-    # This means the robot needs to turn CLOCKWISE (right) to reach the target faster.
-    if heading_error > 0:  
-        # To turn right: Left wheel forward, Right wheel backward
+    # Determine direction of turn and set motor speeds
+    # If heading_error is positive, target_yaw is "ahead" (counter-clockwise)
+    # If heading_error is negative, target_yaw is "behind" (clockwise)
+    if heading_error > 0:  # Robot needs to turn counter-clockwise (increase yaw)
+        # Left wheel backward, Right wheel forward (differential turn)
+        left_speed_val = -turn_speed 
+        right_speed_val = turn_speed
+    else:  # Robot needs to turn clockwise (decrease yaw)
+        # Left wheel forward, Right wheel backward (differential turn)
         left_speed_val = turn_speed
         right_speed_val = -turn_speed
-    # If heading_error is negative, target_yaw is "behind" (e.g., from East to North)
-    # This means the robot needs to turn COUNTER-CLOCKWISE (left) to reach the target faster.
-    else:  
-        # To turn left: Left wheel backward, Right wheel forward
-        left_speed_val = -turn_speed
-        right_speed_val = turn_speed
             
     return left_speed_val, right_speed_val, False # Turn not complete
 
@@ -452,9 +423,25 @@ def run_robot_control(start_node, goal_node):
     if path_with_directions:
         planned_path = path_with_directions
         print(f"Planned path: {planned_path}")
+        
+        # --- AUTOMATE INITIAL YAW ANGLE ---
+        if planned_path:
+            # The first item in planned_path is (node_we_are_going_to, direction_from_start_node)
+            # The robot is placed just past start_node, facing the next node.
+            # So, its initial orientation should match the direction of the first segment.
+            _, initial_direction_str = planned_path[0] 
+            yaw_angle = get_target_yaw_from_direction(initial_direction_str) # Set initial yaw
+            print(f"Initial yaw angle set to: {yaw_angle * 180/pi:.2f} deg (facing {initial_direction_str})")
+        else:
+            print("Planned path is empty. Cannot determine initial orientation. Stopping.")
+            current_state = 'stopping' # Cannot proceed without a path
+            return # Exit if no path
+        # --- END AUTOMATE INITIAL YAW ANGLE ---
+
     else:
         print(f"No path found from {start_node} to {goal_node}. Stopping.")
         current_state = 'stopping' # Can't proceed without a path
+        return # Exit if no path
 
     try:
         while True:
@@ -465,6 +452,8 @@ def run_robot_control(start_node, goal_node):
 
             gyro = mpu.get_gyro()
             # Integrate gyro Z to estimate yaw angle (convert deg/s to rad/s)
+            # This assumes positive gyro Z is counter-clockwise, and negative is clockwise,
+            # which aligns with your observation that left turns increase angle and right turns decrease it.
             yaw_angle += gyro['z'] * dt_mpu * (pi / 180.0) 
             yaw_angle = normalize_angle_rad(yaw_angle) # Keep yaw within [-pi, pi]
 
@@ -495,35 +484,6 @@ def run_robot_control(start_node, goal_node):
                     
                     # Debounce: must detect for 3 cycles and not already processed
                     if intersection_counter >= 3 and not intersection_processed: 
-                        # Get the node ID from the current planned_path entry. This is the node the robot just arrived at.
-                        # The path_index points to the *segment* from current_node to next_node.
-                        # So, planned_path[path_index] is (next_node, direction_to_get_there_from_previous_node).
-                        # The node we just arrived at is implicitly the 'previous' node of the current segment.
-                        # A better way to track current node might be to have a separate 'current_robot_node' variable.
-                        # For now, let's assume planned_path[path_index][0] is the *next* node we are heading towards.
-                        # This means when we detect an intersection, we have arrived at the node that *was* the next_node.
-                        
-                        # Let's re-think this: when path_index is 0, planned_path[0] is (first_node_after_start, direction).
-                        # When we hit the first intersection, we are at `start_node` and need to go to `planned_path[0][0]`.
-                        # So, if we are at an intersection, the node we *just arrived at* is the one that was `planned_path[path_index-1][0]`
-                        # if path_index > 0.
-                        # Or, even simpler: if we are at an intersection, and we are about to make a decision,
-                        # the node we are AT is the `source` for the next path segment.
-                        # So, when entering `at_intersection` state, the node we are *at* is the one *before* planned_path[path_index][0].
-
-                        # This logic needs refinement. A simple approach:
-                        # planned_path[path_index] = (node_we_are_GOING_TO, direction_to_get_there)
-                        # So, when we hit an intersection, we have ARRIVED at planned_path[path_index][0].
-                        
-                        # Let's use the explicit `current_node_id_in_path` logic used in the `at_intersection` state.
-                        # At this point, if path_index is `X`, it means we are driving along the segment
-                        # which will lead us *to* the node that is `planned_path[X][0]`.
-                        # So, the node we are about to process (turn at/pass through) is `planned_path[path_index][0]`.
-                        
-                        # For clearer node tracking, let's say the current node the robot *thinks* it is at.
-                        # This variable will be updated AFTER a turn or decision at an intersection.
-                        # We will make this explicit.
-                        
                         print(f"Intersection detected! Preparing to process next segment.")
                         current_state = 'at_intersection'
                         intersection_processed = True
@@ -540,8 +500,8 @@ def run_robot_control(start_node, goal_node):
                     # Slow down and try to find the line
                     left_speed = BASE_SPEED * 0.3
                     right_speed = BASE_SPEED * 0.3
-                    # Potentially transition to a more aggressive line search state
-                    # For now, it just slows down. Could add a dedicated 'line_lost_search' state.
+                    # For a simple line lost, we could add a dedicated 'line_lost_search' state
+                    # or just rely on slowing down here.
                 else:
                     correction = int(error * KP)
                     left_speed = BASE_SPEED - correction
@@ -562,13 +522,6 @@ def run_robot_control(start_node, goal_node):
                 else:
                     # Drive-through complete, now determine next action based on path
                     
-                    # The current_node_id represents the node the robot has just arrived at.
-                    # If path_index is 0, we are at start_node, and planning to go to planned_path[0][0].
-                    # If path_index > 0, we have just completed the segment that led to planned_path[path_index-1][0].
-                    # So, the current node we are "at" is the node from the *previous* path segment,
-                    # or the start_node if it's the very beginning.
-
-                    # Let's define the current_node_for_logic clearly:
                     current_node_for_logic = start_node if path_index == 0 else planned_path[path_index-1][0]
                     
                     # If this is the last step in the planned_path, then current_node_for_logic is our goal.
@@ -595,8 +548,8 @@ def run_robot_control(start_node, goal_node):
 
                     print(f"Finished driving through node {current_node_for_logic}. Next node in path: {next_node_id_in_path}. Direction to take: {direction_to_take}")
                     
-                    # Calculate target yaw for the next segment using coordinates
-                    turn_target_yaw = get_bearing_to_next_node(current_node_for_logic, next_node_id_in_path, yaw_angle)
+                    # Calculate target yaw for the next segment using the explicit direction
+                    turn_target_yaw = get_target_yaw_from_direction(direction_to_take)
                     
                     print(f"Current Yaw: {yaw_angle * 180/pi:.2f} deg, Target Yaw: {turn_target_yaw * 180/pi:.2f} deg")
                     current_state = 'turning'
@@ -672,14 +625,10 @@ def run_robot_control(start_node, goal_node):
         print("Motors stopped.")
 
 # ----- Path finding example and robot run -----
-start_node = "C1"
-goal_node = "B2" # Example goal node
+start_node = "P1"
+goal_node = "P8" # Example goal node
 
 print(f"Calculating shortest path from {start_node} to {goal_node}...")
-# The path is now calculated inside run_robot_control
-# and stored in the global planned_path variable.
 
 # Start the robot control loop
 run_robot_control(start_node, goal_node)
-
-
