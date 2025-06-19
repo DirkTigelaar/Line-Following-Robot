@@ -1,3 +1,4 @@
+
 # THIS CODE READS ALL THE SENSOR VALUES
 # LINE FOLLOWING BEHAVIOUR WITH NODE DETECTION AND DIJKSTRA PATH FOLLOWING
 
@@ -401,45 +402,41 @@ def calculate_line_error(ir_values):
 
 def execute_turn(current_yaw, target_yaw, base_speed, max_speed_val):
     """
-    Execute a turn to reach the target yaw angle using proportional control.
-    Returns left_speed, right_speed, turn_complete flag.
+    Calculates motor speeds for the robot to turn towards a target yaw angle.
+    Returns left_speed, right_speed, and a boolean indicating if the turn is complete.
     """
     current_yaw = normalize_angle_rad(current_yaw)
     target_yaw = normalize_angle_rad(target_yaw)
 
     heading_error = target_yaw - current_yaw
-    heading_error = normalize_angle_rad(heading_error) # Normalize error to [-pi, pi]
+    heading_error = normalize_angle_rad(heading_error) # Keep error within [-pi, pi]
 
-    turn_tolerance = 0.05 # Radians (approx 3 degrees) - Made stricter for better precision
+    turn_tolerance = 0.05 # Radians (approx 3 degrees)
 
-    # Check for turn completion first
     if abs(heading_error) < turn_tolerance:
         return 0, 0, True # Turn complete
 
-    turn_kp = 1500.0 # Proportional gain for turning speed - Adjusted to be more aggressive for turning
+    turn_kp = 1500.0 # Proportional gain for turning speed
     
-    raw_turn_speed = turn_kp * abs(heading_error) # Calculate speed based on absolute error
-
-    max_abs_turn_speed = max_speed_val 
+    raw_turn_speed = turn_kp * abs(heading_error)
     min_abs_turn_speed_threshold = base_speed * 0.5 
 
-    turn_speed = raw_turn_speed
-    if turn_speed < min_abs_turn_speed_threshold:
-        turn_speed = min_abs_turn_speed_threshold
-    
-    turn_speed = min(turn_speed, max_abs_turn_speed)
+    turn_speed = max(raw_turn_speed, min_abs_turn_speed_threshold)
+    turn_speed = min(turn_speed, max_speed_val)
 
-    # Determine direction of turn and set motor speeds
-    # If heading_error is positive, target_yaw is "ahead" (counter-clockwise)
-    # If heading_error is negative, target_yaw is "behind" (clockwise)
-    if heading_error > 0:  # Robot needs to turn counter-clockwise (increase yaw)
-        # Left wheel backward, Right wheel forward (differential turn)
-        left_speed_val = -turn_speed 
-        right_speed_val = turn_speed
-    else:  # Robot needs to turn clockwise (decrease yaw)
-        # Left wheel forward, Right wheel backward (differential turn)
+    # Determine motor directions based on heading error
+    # If heading_error is positive, target_yaw is "ahead" (e.g., from West to North)
+    # This means the robot needs to turn CLOCKWISE (right) to reach the target faster.
+    if heading_error > 0:  
+        # To turn right: Left wheel forward, Right wheel backward
         left_speed_val = turn_speed
         right_speed_val = -turn_speed
+    # If heading_error is negative, target_yaw is "behind" (e.g., from East to North)
+    # This means the robot needs to turn COUNTER-CLOCKWISE (left) to reach the target faster.
+    else:  
+        # To turn left: Left wheel backward, Right wheel forward
+        left_speed_val = -turn_speed
+        right_speed_val = turn_speed
             
     return left_speed_val, right_speed_val, False # Turn not complete
 
