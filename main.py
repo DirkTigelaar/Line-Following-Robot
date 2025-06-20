@@ -1,5 +1,5 @@
 # THIS CODE READS ALL THE SENSOR VALUES
-# PATH FOLOWING BAHAVIOUR
+# LINE FOLLOWING BEHAVIOUR
 
 from machine import Pin, I2C, PWM
 from time import sleep_us, sleep_ms, ticks_us, ticks_diff, sleep, ticks_ms
@@ -214,6 +214,8 @@ MAX_CORRECTION = 200
 NODE_SENSOR_THRESHOLD = 3 
 # Time to stop at a node (in ms)
 NODE_STOP_TIME_MS = 500 
+# Cooldown period for node detection (in ms)
+NODE_DETECTION_COOLDOWN_MS = 2000 # 2 seconds
 
 # ----- Path Planning Grid (Corrected and Weighted) -----
 corrected_weighted_grid = {
@@ -345,12 +347,13 @@ def get_direction_between_nodes(node1, node2, grid):
     return None
 
 # --- Hardcoded Start and Goal Nodes ---
-START_NODE = "C1"
-GOAL_NODE = "B2"
+START_NODE = "P1"
+GOAL_NODE = "P8"
 
-# Global variables for yaw calculation
+# Global variables for yaw calculation and node detection cooldown
 yaw_angle = 0.0 # Yaw angle in radians
 last_time = ticks_ms()
+last_node_detection_time = 0 # Initialize for cooldown
 
 # Cardinal directions and their target yaw angles (in radians)
 # Assumes 'E' (East) is 0 radians, 'N' (North) is pi/2, 'S' (South) is -pi/2, 'W' (West) is pi.
@@ -385,7 +388,7 @@ def orient_robot(target_yaw_radians):
         current_yaw_normalized = normalize_angle_rad(yaw_angle)
         angle_diff = get_shortest_angle_difference_rad(current_yaw_normalized, target_yaw_radians)
 
-        # FIXED: Corrected motor control logic for turning.
+        # Corrected motor control logic for turning.
         # If angle_diff > 0, target is counter-clockwise (Left) relative to current.
         # If angle_diff < 0, target is clockwise (Right) relative to current.
         if angle_diff > 0: # Need to turn counter-clockwise (Left)
@@ -420,7 +423,7 @@ def orient_robot(target_yaw_radians):
 # ----- Line Following Control Loop -----
 def run_line_follower():
     """Main loop for line following and node detection and path navigation."""
-    global yaw_angle, last_time, current_path_idx # Declare global to modify
+    global yaw_angle, last_time, current_path_idx, last_node_detection_time # Declare global to modify
 
     # Global to track current position in path
     current_path_idx = 0 
@@ -464,44 +467,47 @@ def run_line_follower():
                     weighted_sum += weights[i]
                     num_active_sensors += 1
 
-            # --- Node Detection Logic ---
+            # --- Node Detection Logic with Cooldown ---
             # A node is detected if a significant number of sensors (e.g., 3 or more) detect the line.
             # This covers T-junctions, intersections, and wider corners.
             if num_active_sensors >= NODE_SENSOR_THRESHOLD:
-                stop_motors()
-                print("\n*** NODE DETECTED! Stopping briefly. ***")
-                sleep_ms(NODE_STOP_TIME_MS)
-
-                # Check if we are still on the path
-                if current_path_idx < len(calculated_path) - 1:
-                    current_node_name = calculated_path[current_path_idx]
-                    next_node_name = calculated_path[current_path_idx + 1]
-                    
-                    direction_to_next = get_direction_between_nodes(current_node_name, next_node_name, corrected_weighted_grid)
-                    
-                    if direction_to_next and direction_to_next in TARGET_YAW_ANGLES:
-                        target_yaw = TARGET_YAW_ANGLES[direction_to_next]
-                        print(f"Current node: {current_node_name}, Next node: {next_node_name}")
-                        print(f"Required turn direction: {direction_to_next}, Target Yaw: {target_yaw * 180/pi:.2f} deg")
-                        orient_robot(target_yaw) # Orient the robot
-                        current_path_idx += 1 # Advance to the next node in the path
-                    else:
-                        print(f"Warning: Could not determine direction from {current_node_name} to {next_node_name} or direction is not recognized.")
-                        current_path_idx += 1 # Still advance, to avoid getting stuck at this node
-                elif current_path_idx == len(calculated_path) - 1:
-                    print("*** GOAL NODE REACHED! ***")
+                # Check if enough time has passed since the last node detection
+                if (current_time - last_node_detection_time) >= NODE_DETECTION_COOLDOWN_MS:
                     stop_motors()
-                    # Optionally, add a behavior for reaching the goal, e.g., electromagnet action, sound.
-                    while True: # Keep robot stopped at goal
-                        sleep(1) # Sleep indefinitely or until reset
-                else:
-                    # This case should ideally not be reached if logic is sound,
-                    # but it covers scenarios where a node is detected beyond the end of the path.
-                    print("Node detected, but path already completed or index out of bounds.")
-                    stop_motors() # Stop to prevent unexpected movement
+                    print("\n*** NODE DETECTED! Stopping briefly. ***")
+                    sleep_ms(NODE_STOP_TIME_MS)
+                    last_node_detection_time = current_time # Update last detection time
 
-                # After node handling (orientation or goal reached), line following will resume naturally
-                # or the robot will stay stopped if at the goal.
+                    # Check if we are still on the path
+                    if current_path_idx < len(calculated_path) - 1:
+                        current_node_name = calculated_path[current_path_idx]
+                        next_node_name = calculated_path[current_path_idx + 1]
+                        
+                        direction_to_next = get_direction_between_nodes(current_node_name, next_node_name, corrected_weighted_grid)
+                        
+                        if direction_to_next and direction_to_next in TARGET_YAW_ANGLES:
+                            target_yaw = TARGET_YAW_ANGLES[direction_to_next]
+                            print(f"Current node: {current_node_name}, Next node: {next_node_name}")
+                            print(f"Required turn direction: {direction_to_next}, Target Yaw: {target_yaw * 180/pi:.2f} deg")
+                            orient_robot(target_yaw) # Orient the robot
+                            current_path_idx += 1 # Advance to the next node in the path
+                        else:
+                            print(f"Warning: Could not determine direction from {current_node_name} to {next_node_name} or direction is not recognized.")
+                            current_path_idx += 1 # Still advance, to avoid getting stuck at this node
+                    elif current_path_idx == len(calculated_path) - 1:
+                        print("*** GOAL NODE REACHED! ***")
+                        stop_motors()
+                        # Optionally, add a behavior for reaching the goal, e.g., electromagnet action, sound.
+                        while True: # Keep robot stopped at goal
+                            sleep(1) # Sleep indefinitely or until reset
+                    else:
+                        # This case should ideally not be reached if logic is sound,
+                        # but it covers scenarios where a node is detected beyond the end of the path.
+                        print("Node detected, but path already completed or index out of bounds.")
+                        stop_motors() # Stop to prevent unexpected movement
+
+                    # After node handling (orientation or goal reached), line following will resume naturally
+                    # or the robot will stay stopped if at the goal.
 
             # Continue with line following if not at goal or if orientation is complete
             if num_active_sensors > 0:
