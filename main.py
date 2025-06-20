@@ -346,8 +346,40 @@ def get_direction_between_nodes(node1, node2, grid):
             return direction
     return None
 
+# --- Robust Node Detection Logic ---
+def is_node_detected_robust(ir_values, num_active_sensors):
+    """
+    Checks if a node is detected based on IR sensor patterns.
+    Args:
+        ir_values (list): List of 0s and 1s from IR sensors (0 = line, 1 = no line).
+                          Assumes 5 sensors: [L_outer, L_inner, Center, R_inner, R_outer]
+        num_active_sensors (int): Count of sensors detecting the line.
+    Returns:
+        bool: True if a node is detected, False otherwise.
+    """
+    # Pattern for T-junctions or intersections (many sensors on line)
+    # This captures wide lines.
+    if num_active_sensors >= NODE_SENSOR_THRESHOLD:
+        return True
+
+    # Pattern for a distinct side road to the left (leftmost and center on line, rightmost off)
+    # This helps catch 90-degree turns that might not activate many sensors for long
+    if ir_values[0] == 0 and ir_values[2] == 0 and ir_values[4] == 1:
+        return True
+    
+    # Pattern for a distinct side road to the right (rightmost and center on line, leftmost off)
+    if ir_values[4] == 0 and ir_values[2] == 0 and ir_values[0] == 1:
+        return True
+    
+    # Another pattern for wider lines/junctions where inner sensors are active along with center,
+    # suggesting widening of the path or a junction forming.
+    if (ir_values[1] == 0 and ir_values[2] == 0 and ir_values[3] == 0): # Inner three sensors active
+        return True
+
+    return False
+
 # --- Hardcoded Start and Goal Nodes ---
-START_NODE = "P1"
+START_NODE = "A1"
 GOAL_NODE = "P8"
 
 # Global variables for yaw calculation and node detection cooldown
@@ -468,9 +500,8 @@ def run_line_follower():
                     num_active_sensors += 1
 
             # --- Node Detection Logic with Cooldown ---
-            # A node is detected if a significant number of sensors (e.g., 3 or more) detect the line.
-            # This covers T-junctions, intersections, and wider corners.
-            if num_active_sensors >= NODE_SENSOR_THRESHOLD:
+            # Now using the more robust detection function
+            if is_node_detected_robust(ir_values, num_active_sensors):
                 # Check if enough time has passed since the last node detection
                 if (current_time - last_node_detection_time) >= NODE_DETECTION_COOLDOWN_MS:
                     stop_motors()
@@ -535,7 +566,7 @@ def run_line_follower():
             print("IR Sensors:", ir_values)
             print("Error:", error)
             print("Correction:", correction)
-            print(f"Left Speed: {left_speed}, Right Speed: {right_speed}")
+            print(f"Left Speed: {left_speed}, Right Speed: {re_speed}")
             print("Encoder 1 Count:", position1)
             print("Encoder 2 Count:", position2)
             print("Distance: {:.2f} cm".format(dist) if dist != -1 else "Ultrasonic: Timeout")
@@ -577,4 +608,3 @@ else:
 
 # Start the line following loop (robot will start moving after path is calculated and printed)
 run_line_follower()
-
