@@ -212,14 +212,11 @@ MAX_CORRECTION = 200
 
 # ----- Node Detection Parameters ---
 # Threshold for number of active sensors to consider it a node
-NODE_SENSOR_THRESHOLD = 3
+NODE_SENSOR_THRESHOLD = 3 
 # Time to stop at a node (in ms)
-NODE_STOP_TIME_MS = 500
+NODE_STOP_TIME_MS = 500 
 # Cooldown period for node detection (in ms)
 NODE_DETECTION_COOLDOWN_MS = 2000 # 2 seconds
-
-# --- Global variable to store previous IR sensor readings ---
-last_ir_values = [1, 1, 1, 1, 1] # Initialize with all sensors off line
 
 # ----- Path Planning Grid (Corrected and Weighted) -----
 corrected_weighted_grid = {
@@ -353,7 +350,7 @@ def get_direction_between_nodes(node1, node2, grid):
 # --- Robust Node Detection Logic ---
 def is_node_detected_robust(ir_values, num_active_sensors):
     """
-    Checks if a node is detected based on current and previous IR sensor patterns.
+    Checks if a node is detected based on IR sensor patterns.
     Args:
         ir_values (list): List of 0s and 1s from IR sensors (0 = line, 1 = no line).
                           Assumes 5 sensors: [L_outer, L_inner, Center, R_inner, R_outer]
@@ -361,66 +358,30 @@ def is_node_detected_robust(ir_values, num_active_sensors):
     Returns:
         bool: True if a node is detected, False otherwise.
     """
-    global last_ir_values
+    # Pattern for T-junctions or intersections (many sensors on line)
+    # This captures wide lines.
+    if num_active_sensors >= NODE_SENSOR_THRESHOLD:
+        return True
 
-    # Priority 1: Full Intersection (all sensors on line)
-    # This is the clearest indication of a cross or very wide junction.
-    if (ir_values[0] == 0 and ir_values[1] == 0 and ir_values[2] == 0 and ir_values[3] == 0 and ir_values[4] == 0):
-        print("Node Detected: Full cross intersection (all sensors on).")
+    # Pattern for a distinct side road to the left (leftmost and center on line, rightmost off)
+    # This helps catch 90-degree turns that might not activate many sensors for long
+    if ir_values[0] == 0 and ir_values[2] == 0 and ir_values[4] == 1:
         return True
     
-    # Priority 2: General Wide Line / T-junction (Many sensors on line, but not necessarily all)
-    # This catches most standard T-junctions or wider parts of the line.
-    if num_active_sensors >= NODE_SENSOR_THRESHOLD: # NODE_SENSOR_THRESHOLD is 3
-        print(f"Node Detected: High active sensor count ({num_active_sensors}).")
-        return True
-
-    # Priority 3: Clear Side Road Patterns (These capture specific T-junction shapes)
-    # Left Side Road (line branches left):
-    # Left-outer, Left-inner, Center are on line; Right-inner and Right-outer are off.
-    if (ir_values[0] == 0 and ir_values[1] == 0 and ir_values[2] == 0 and
-        ir_values[3] == 1 and ir_values[4] == 1):
-        print("Node Detected: Clear left side road (T-junction).")
-        return True
-
-    # Right Side Road (line branches right):
-    # Right-outer, Right-inner, Center are on line; Left-inner and Left-outer are off.
-    if (ir_values[4] == 0 and ir_values[3] == 0 and ir_values[2] == 0 and
-        ir_values[1] == 1 and ir_values[0] == 1):
-        print("Node Detected: Clear right side road (T-junction).")
+    # Pattern for a distinct side road to the right (rightmost and center on line, leftmost off)
+    if ir_values[4] == 0 and ir_values[2] == 0 and ir_values[0] == 1:
         return True
     
-    # Priority 4: 90-Degree Corner Patterns (L-shapes, often detected at the start of a sharp turn)
-    # These patterns rely on the robot just coming from a single line segment.
-    # The condition `not (last_ir_values[0] == 0 and ...)` ensures it wasn't already a full intersection.
-
-    # Left 90-degree corner:
-    # Line is on the left side sensors, and definitely NOT on the far right sensor.
-    # This implies the line has sharply moved to the left.
-    if (ir_values[0] == 0 and               # Left-outer on line
-        ir_values[4] == 1 and               # Right-outer off line (key for a turn, not a cross)
-        (ir_values[1] == 0 or ir_values[2] == 0) and # At least one of inner-left or center is also on line
-        not (last_ir_values[0] == 0 and last_ir_values[1] == 0 and last_ir_values[2] == 0 and last_ir_values[3] == 0 and last_ir_values[4] == 0) # Was not a full intersection previously
-       ):
-        print("Node Detected: 90-degree left corner (L-shape).")
-        return True
-
-    # Right 90-degree corner:
-    # Line is on the right side sensors, and definitely NOT on the far left sensor.
-    # This implies the line has sharply moved to the right.
-    if (ir_values[4] == 0 and               # Right-outer on line
-        ir_values[0] == 1 and               # Left-outer off line (key for a turn, not a cross)
-        (ir_values[3] == 0 or ir_values[2] == 0) and # At least one of inner-right or center is also on line
-        not (last_ir_values[0] == 0 and last_ir_values[1] == 0 and last_ir_values[2] == 0 and last_ir_values[3] == 0 and last_ir_values[4] == 0) # Was not a full intersection previously
-       ):
-        print("Node Detected: 90-degree right corner (L-shape).")
+    # Another pattern for wider lines/junctions where inner sensors are active along with center,
+    # suggesting widening of the path or a junction forming.
+    if (ir_values[1] == 0 and ir_values[2] == 0 and ir_values[3] == 0): # Inner three sensors active
         return True
 
     return False
 
-# ----- Hardcoded Start and Goal Nodes ---
-START_NODE = "P1"
-GOAL_NODE = "P5"
+# --- Hardcoded Start and Goal Nodes ---
+START_NODE = "E2"
+GOAL_NODE = "E1"
 
 # Global variables for yaw calculation and node detection cooldown
 yaw_angle = 0.0 # Yaw angle in radians
@@ -495,10 +456,10 @@ def orient_robot(target_yaw_radians):
 # ----- Line Following Control Loop -----
 def run_line_follower():
     """Main loop for line following and node detection and path navigation."""
-    global yaw_angle, last_time, current_path_idx, last_node_detection_time, last_ir_values # Declare global to modify
+    global yaw_angle, last_time, current_path_idx, last_node_detection_time # Declare global to modify
 
     # Global to track current position in path
-    current_path_idx = 0
+    current_path_idx = 0 
     
     print(f"\nCalculated path from {START_NODE} to {GOAL_NODE}: {calculated_path}")
 
@@ -580,9 +541,6 @@ def run_line_follower():
                     # After node handling (orientation or goal reached), line following will resume naturally
                     # or the robot will stay stopped if at the goal.
 
-            # Important: Update last_ir_values *after* checking for nodes but *before* the next loop iteration
-            last_ir_values = list(ir_values) # Make a copy to avoid reference issues
-
             # Continue with line following if not at goal or if orientation is complete
             if num_active_sensors > 0:
                 error = weighted_sum / num_active_sensors
@@ -607,10 +565,9 @@ def run_line_follower():
             # Print current robot state for debugging
             print("\n--- Line Following ---")
             print("IR Sensors:", ir_values)
-            print("Last IR Sensors:", last_ir_values) # Added for debugging
             print("Error:", error)
             print("Correction:", correction)
-            print(f"Left Speed: {left_speed}, Right Speed: {right_speed}")
+            print(f"Left Speed: {left_speed}, Right Speed: {right_speed}") # FIXED: changed 're_speed' to 'right_speed'
             print("Encoder 1 Count:", position1)
             print("Encoder 2 Count:", position2)
             print("Distance: {:.2f} cm".format(dist) if dist != -1 else "Ultrasonic: Timeout")
