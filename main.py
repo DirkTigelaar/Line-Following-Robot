@@ -1,5 +1,6 @@
 # THIS CODE READS ALL THE SENSOR VALUES
 # LINE FOLLOWING BEHAVIOUR
+# ©GROUP 3
 
 from machine import Pin, I2C, PWM
 from time import sleep_us, sleep_ms, ticks_us, ticks_diff, sleep, ticks_ms
@@ -379,8 +380,8 @@ def is_node_detected_robust(ir_values, num_active_sensors):
     return False
 
 # --- Hardcoded Start and Goal Nodes ---
-START_NODE = "A1"
-GOAL_NODE = "P8"
+START_NODE = "C1"
+GOAL_NODE = "B2"
 
 # Global variables for yaw calculation and node detection cooldown
 yaw_angle = 0.0 # Yaw angle in radians
@@ -396,7 +397,7 @@ TARGET_YAW_ANGLES = {
     'W': pi          # 180 degrees
 }
 
-TURN_SPEED = 400 # Speed for turning (adjust as needed for controlled turns, increased from 200)
+TURN_SPEED = 600 # Speed for turning (adjust as needed for controlled turns, increased from 200)
 # Yaw tolerance: now 10 degrees on each side
 YAW_TOLERANCE = 10.0 * (pi / 180.0) # Converted from 10 degrees to radians for precision
 
@@ -478,10 +479,10 @@ def run_line_follower():
             dist = read_distance(trig, echo)
             
             # Button state
-            button_pressed = button.value() == 1
+            button_pressed = button.value() == 0
             
             # Activate electromagnet
-            if button.value() == 0:
+            if button.value() == 1:
                 electromagnet.off()
             else:
                 electromagnet.on()
@@ -566,7 +567,7 @@ def run_line_follower():
             print("IR Sensors:", ir_values)
             print("Error:", error)
             print("Correction:", correction)
-            print(f"Left Speed: {left_speed}, Right Speed: {re_speed}")
+            print(f"Left Speed: {left_speed}, Right Speed: {right_speed}") # FIXED: changed 're_speed' to 'right_speed'
             print("Encoder 1 Count:", position1)
             print("Encoder 2 Count:", position2)
             print("Distance: {:.2f} cm".format(dist) if dist != -1 else "Ultrasonic: Timeout")
@@ -608,3 +609,4 @@ else:
 
 # Start the line following loop (robot will start moving after path is calculated and printed)
 run_line_follower()
+
