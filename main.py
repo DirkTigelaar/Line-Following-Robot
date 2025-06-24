@@ -1,5 +1,7 @@
 # THIS CODE READS ALL THE SENSOR VALUES
-# LINE FOLLOWING BEHAVIOUR
+# LINE FOLLOWING
+# PATH FOLLOWING
+# OBSTACLE AVOIDANCE
 # ©GROUP 3
 
 from machine import Pin, I2C, PWM
@@ -383,8 +385,8 @@ def is_node_detected_robust(ir_values, num_active_sensors):
     return False
 
 # --- Hardcoded Start and Goal Nodes ---
-START_NODE = "C3"
-GOAL_NODE = "B1"
+START_NODE = "C1"
+GOAL_NODE = "C3"
 
 # Global variables for yaw calculation and node detection cooldown
 yaw_angle = 0.0 # Yaw angle in radians
@@ -405,17 +407,18 @@ TURN_SPEED = 600 # Speed for turning (adjust as needed for controlled turns, inc
 # Yaw tolerance: now 10 degrees on each side
 YAW_TOLERANCE = 10.0 * (pi / 180.0) # Converted from 10 degrees to radians for precision
 
-def orient_robot(target_yaw_radians, spin_in_place=False):
+def orient_robot(target_yaw_radians, spin_in_place=True): # Changed default to True
     """
     Orients the robot to a target yaw angle.
     Args:
         target_yaw_radians (float): The desired yaw angle in radians (-pi to pi).
         spin_in_place (bool): If True, spins in place (one wheel forward, one backward).
-                              If False (default), pivots using one stationary wheel.
+                              If False, pivots using one stationary wheel.
+                              For this modification, we will force spin_in_place to be True.
     """
     global yaw_angle, last_time
 
-    print(f"Orienting robot to {target_yaw_radians:.2f} rad ({target_yaw_radians * 180/pi:.2f} deg){' (Spin in Place)' if spin_in_place else ''}...")
+    print(f"Orienting robot to {target_yaw_radians:.2f} rad ({target_yaw_radians * 180/pi:.2f} deg) (Spin in Place)...") # Simplified print
     
     # Normalize target angle for consistency
     target_yaw_radians = normalize_angle_rad(target_yaw_radians)
@@ -427,25 +430,15 @@ def orient_robot(target_yaw_radians, spin_in_place=False):
         current_yaw_normalized = normalize_angle_rad(yaw_angle)
         angle_diff = get_shortest_angle_difference_rad(current_yaw_normalized, target_yaw_radians)
 
-        if spin_in_place:
-            # Spin in place: one wheel forward, one backward
-            if angle_diff > 0: # Need to turn counter-clockwise (Left)
-                set_motor_speed(motor1_pwm, motor1_in2_pin, -TURN_SPEED) # Left wheel backward
-                set_motor_speed(motor2_pwm, motor2_in2_pin, TURN_SPEED)  # Right wheel forward
-                turn_direction_str = "LEFT (CCW) - Spin"
-            else: # Need to turn clockwise (Right)
-                set_motor_speed(motor1_pwm, motor1_in2_pin, TURN_SPEED)  # Left wheel forward
-                set_motor_speed(motor2_pwm, motor2_in2_pin, -TURN_SPEED) # Right wheel backward
-                turn_direction_str = "RIGHT (CW) - Spin"
-        else: # Original pivot turn behavior
-            if angle_diff > 0: # Need to turn counter-clockwise (Left)
-                set_motor_speed(motor1_pwm, motor1_in2_pin, 0)          # Left wheel stopped
-                set_motor_speed(motor2_pwm, motor2_in2_pin, TURN_SPEED) # Right wheel forward
-                turn_direction_str = "LEFT (CCW) - Pivot"
-            else: # Need to turn clockwise (Right)
-                set_motor_speed(motor1_pwm, motor1_in2_pin, TURN_SPEED) # Left wheel forward
-                set_motor_speed(motor2_pwm, motor2_in2_pin, 0)          # Right wheel stopped
-                turn_direction_str = "RIGHT (CW) - Pivot"
+        # Always perform a spin in place
+        if angle_diff > 0: # Need to turn counter-clockwise (Left)
+            set_motor_speed(motor1_pwm, motor1_in2_pin, -TURN_SPEED) # Left wheel backward
+            set_motor_speed(motor2_pwm, motor2_in2_pin, TURN_SPEED)  # Right wheel forward
+            turn_direction_str = "LEFT (CCW) - Spin"
+        else: # Need to turn clockwise (Right)
+            set_motor_speed(motor1_pwm, motor1_in2_pin, TURN_SPEED)  # Left wheel forward
+            set_motor_speed(motor2_pwm, motor2_in2_pin, -TURN_SPEED) # Right wheel backward
+            turn_direction_str = "RIGHT (CW) - Spin"
 
         # Update yaw angle
         gyro = mpu.get_gyro()
@@ -659,4 +652,3 @@ else:
 
 # Start the line following loop (robot will start moving after path is calculated and printed)
 run_line_follower()
-
