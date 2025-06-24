@@ -306,6 +306,8 @@ def find_path_dijkstra(start_node, goal_node, grid_map_weighted, blocked_nodes=N
         for direction, neighbor_info in grid_map_weighted[current_node_pq].items():
             if neighbor_info: # Check if there's a valid connection
                 neighbor, weight = neighbor_info
+                # The 'blocked_nodes' parameter is kept for general use,
+                # but for this specific obstacle avoidance, we rely on high edge weights.
                 if neighbor not in blocked_nodes:
                     distance = current_distance + weight
                     # If a shorter path to the neighbor is found
@@ -314,7 +316,7 @@ def find_path_dijkstra(start_node, goal_node, grid_map_weighted, blocked_nodes=N
                         new_path = path_pq + [neighbor]
                         heapq.heappush(priority_queue, (distance, neighbor, new_path))
 
-    print("No path found from {} to {}".format(start_node, goal_node))
+    print(f"No path found from {start_node} to {goal_node} with blocked nodes: {blocked_nodes}")
     return []
 
 # --- Helper functions for orientation (now using radians) ---
@@ -351,6 +353,38 @@ def get_direction_between_nodes(node1, node2, grid):
         if info and info[0] == node2:
             return direction
     return None
+
+def block_path_segment_by_weight(node1, node2, grid, new_weight=1000.0):
+    """
+    Increases the weight of the path segment between node1 and node2 in the grid
+    to effectively block it for future path calculations. It also attempts to block
+    the reverse path for symmetry, assuming obstacles block both directions.
+    Args:
+        node1 (str): The starting node of the segment.
+        node2 (str): The ending node of the segment.
+        grid (dict): The weighted grid map (will be modified).
+        new_weight (float): The high weight to assign to the blocked path.
+    Returns:
+        bool: True if at least one segment was found and its weight increased, False otherwise.
+    """
+    found_and_blocked = False
+    
+    # Block path from node1 to node2
+    for direction, info in grid[node1].items():
+        if info and info[0] == node2:
+            grid[node1][direction] = (node2, new_weight)
+            print(f"Path from {node1} to {node2} ({direction}) weight increased to {new_weight}")
+            found_and_blocked = True
+            break
+    
+    # Block path from node2 to node1 (for bidirectional segments)
+    for direction, info in grid[node2].items():
+        if info and info[0] == node1:
+            grid[node2][direction] = (node1, new_weight)
+            print(f"Path from {node2} to {node1} ({direction}) weight increased to {new_weight}")
+            found_and_blocked = True
+            break
+    return found_and_blocked
 
 # --- Robust Node Detection Logic ---
 def is_node_detected_robust(ir_values, num_active_sensors):
@@ -394,6 +428,10 @@ last_time = ticks_ms()
 last_node_detection_time = 0 # Initialize for cooldown
 obstacle_detected_flag = False # New global flag for obstacle detection
 
+# Global variables to manage path
+calculated_path = [] # Will be populated initially and recalculated
+current_path_idx = 0
+
 # Cardinal directions and their target yaw angles (in radians)
 # Assumes 'E' (East) is 0 radians, 'N' (North) is pi/2, 'S' (South) is -pi/2, 'W' (West) is pi.
 TARGET_YAW_ANGLES = {
@@ -407,7 +445,7 @@ TURN_SPEED = 600 # Speed for turning (adjust as needed for controlled turns, inc
 # Yaw tolerance: now 10 degrees on each side
 YAW_TOLERANCE = 10.0 * (pi / 180.0) # Converted from 10 degrees to radians for precision
 
-def orient_robot(target_yaw_radians, spin_in_place=True): # Changed default to True
+def orient_robot(target_yaw_radians, spin_in_place=True):
     """
     Orients the robot to a target yaw angle.
     Args:
@@ -418,7 +456,7 @@ def orient_robot(target_yaw_radians, spin_in_place=True): # Changed default to T
     """
     global yaw_angle, last_time
 
-    print(f"Orienting robot to {target_yaw_radians:.2f} rad ({target_yaw_radians * 180/pi:.2f} deg) (Spin in Place)...") # Simplified print
+    print(f"Orienting robot to {target_yaw_radians:.2f} rad ({target_yaw_radians * 180/pi:.2f} deg) (Spin in Place)...")
     
     # Normalize target angle for consistency
     target_yaw_radians = normalize_angle_rad(target_yaw_radians)
@@ -463,11 +501,9 @@ def orient_robot(target_yaw_radians, spin_in_place=True): # Changed default to T
 # ----- Line Following Control Loop -----
 def run_line_follower():
     """Main loop for line following and node detection and path navigation."""
-    global yaw_angle, last_time, current_path_idx, last_node_detection_time, obstacle_detected_flag # Declare global to modify
+    global yaw_angle, last_time, current_path_idx, last_node_detection_time, obstacle_detected_flag, \
+           calculated_path # Declare global to modify
 
-    # Global to track current position in path
-    current_path_idx = 0 
-    
     print(f"\nCalculated path from {START_NODE} to {GOAL_NODE}: {calculated_path}")
 
     try:
@@ -492,22 +528,64 @@ def run_line_follower():
                 if not obstacle_detected_flag: # Obstacle just appeared
                     obstacle_detected_flag = True
                     stop_motors() # Ensure motors are stopped before turning
-                    print("\n!!! OBSTACLE DETECTED! Performing 180-degree spin in place. !!!")
+                    print("\n!!! OBSTACLE DETECTED! Performing 180-degree spin in place and recalculating path. !!!")
+
+                    # Identify the node that was supposed to be reached next
+                    # This assumes the obstacle is between the current node (at current_path_idx)
+                    # and the next node (at current_path_idx + 1).
+                    if current_path_idx < len(calculated_path) - 1:
+                        node_before_obstacle = calculated_path[current_path_idx]
+                        node_after_obstacle = calculated_path[current_path_idx + 1]
+                        
+                        # Increase the weight of the path segment to effectively block it
+                        if not block_path_segment_by_weight(node_before_obstacle, node_after_obstacle, corrected_weighted_grid, new_weight=1000.0):
+                             print(f"Warning: Could not find or block segment from {node_before_obstacle} to {node_after_obstacle}.")
+                    else:
+                        # This case means an obstacle was detected when at or near the goal,
+                        # or on the very last segment. Handle accordingly, perhaps just stop.
+                        print("Obstacle detected near end of path or path too short to determine blocked segment. Stopping.")
+                        stop_motors()
+                        sleep(5) # Pause for 5 seconds to signify issue
+                        return # Exit the loop, robot is stuck or at goal with obstacle
+
+                    # Perform the 180-degree turn
                     target_yaw_180 = normalize_angle_rad(yaw_angle + pi)
-                    # Perform the 180-degree turn by spinning in place
                     orient_robot(target_yaw_180, spin_in_place=True) 
                     
-                    # After performing the turn, we assume the obstacle is handled (it's now behind us)
-                    # The flag should be reset to allow the robot to continue line following
-                    obstacle_detected_flag = False 
-                    # No 'continue' here, as we want to proceed with line following immediately after turn
+                    # Recalculate path from the current node to the goal using the modified grid
+                    # The robot's *current logical node* is still `calculated_path[current_path_idx]`
+                    # since it never actually reached the next node due to the obstacle.
+                    current_robot_node = calculated_path[current_path_idx]
+                    
+                    # Recalculate the path. The find_path_dijkstra now uses the grid with increased weights.
+                    new_calculated_path = find_path_dijkstra(current_robot_node, GOAL_NODE, corrected_weighted_grid)
+                    
+                    if not new_calculated_path:
+                        print("CRITICAL ERROR: No alternative path found after obstacle. Stopping.")
+                        stop_motors()
+                        return # Exit the function, robot is stuck
+                    else:
+                        print(f"New path calculated: {new_calculated_path}")
+                        calculated_path = new_calculated_path
+                        current_path_idx = 0 # Reset path index to start of new path
+                        
+                        # After recalculating, re-orient to the new first segment if it exists
+                        if len(calculated_path) > 1:
+                            new_initial_direction = get_direction_between_nodes(calculated_path[0], calculated_path[1], corrected_weighted_grid)
+                            if new_initial_direction and new_initial_direction in TARGET_YAW_ANGLES:
+                                new_target_yaw = TARGET_YAW_ANGLES[new_initial_direction]
+                                print(f"Re-orienting to {new_target_yaw * 180/pi:.2f} deg based on new path direction '{new_initial_direction}'.")
+                                orient_robot(new_target_yaw, spin_in_place=True) # Always spin in place after obstacle
+                            else:
+                                print("Warning: Could not determine direction for new path's first segment. Continuing.")
+                        
+                        obstacle_detected_flag = False # Reset flag to allow normal operation
             
-            # If an obstacle was detected and handled by turning, the flag is now False.
-            # If an obstacle was NOT detected, the flag remains False.
-            # If the flag was true (robot was previously stopped for an obstacle) but now no obstacle, then clear it.
-            # This handles cases where obstacle disappears without a full turn being needed (e.g., fleeting detection)
+            # Handle obstacle clearance *after* any potential re-calculation and re-orientation
             if not is_obstacle_currently_present and obstacle_detected_flag:
-                print("--- Obstacle removed. Resuming. ---")
+                # This block will likely be hit if the obstacle was only momentarily detected
+                # or if the turn effectively moved the robot away from the obstacle's direct line of sight.
+                print("--- Obstacle cleared. Resuming. ---")
                 obstacle_detected_flag = False
             
             # This main block only executes if no obstacle is currently preventing movement
@@ -616,6 +694,12 @@ def run_line_follower():
             print("Button Pressed:", button_pressed)
             print("Yaw angle (deg): {:.2f}".format(yaw_angle * 180/pi))
             print("Obstacle Detected Flag:", obstacle_detected_flag)
+            print("Current Path Index:", current_path_idx)
+            if calculated_path:
+                print("Current Logical Node:", calculated_path[current_path_idx] if current_path_idx < len(calculated_path) else "At Goal or Beyond")
+            # The 'blocked_path_segments' is no longer used for dynamic blocking in this version,
+            # as blocking is now done via increasing edge weights directly in corrected_weighted_grid.
+            # print("Blocked Path Segments (Nodes):", blocked_path_segments)
             
             sleep_ms(20) # Small delay to stabilize readings and prevent busy-waiting
 
@@ -633,7 +717,7 @@ stop_motors()
 mpu = MPU6050(i2c)
 mpu.calibrate_gyro()
 
-# 3. Calculate the path using Dijkstra's
+# 3. Calculate the initial path using Dijkstra's
 calculated_path = find_path_dijkstra(START_NODE, GOAL_NODE, corrected_weighted_grid)
 print(f"Initial Path from {START_NODE} to {GOAL_NODE}: {calculated_path}")
 
@@ -652,3 +736,4 @@ else:
 
 # Start the line following loop (robot will start moving after path is calculated and printed)
 run_line_follower()
+
