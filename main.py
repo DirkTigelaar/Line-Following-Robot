@@ -219,7 +219,7 @@ NODE_STOP_TIME_MS = 500
 NODE_DETECTION_COOLDOWN_MS = 2000 # 2 seconds
 
 # ----- Obstacle Detection Parameters ---
-OBSTACLE_DISTANCE_CM = 5 # Distance threshold for obstacle detection in cm
+OBSTACLE_DISTANCE_CM = 10 # Distance threshold for obstacle detection in cm
 
 # ----- Path Planning Grid (Corrected and Weighted) -----
 corrected_weighted_grid = {
@@ -383,8 +383,8 @@ def is_node_detected_robust(ir_values, num_active_sensors):
     return False
 
 # --- Hardcoded Start and Goal Nodes ---
-START_NODE = "C1"
-GOAL_NODE = "C3"
+START_NODE = "C3"
+GOAL_NODE = "B1"
 
 # Global variables for yaw calculation and node detection cooldown
 yaw_angle = 0.0 # Yaw angle in radians
@@ -405,15 +405,17 @@ TURN_SPEED = 600 # Speed for turning (adjust as needed for controlled turns, inc
 # Yaw tolerance: now 10 degrees on each side
 YAW_TOLERANCE = 10.0 * (pi / 180.0) # Converted from 10 degrees to radians for precision
 
-def orient_robot(target_yaw_radians):
+def orient_robot(target_yaw_radians, spin_in_place=False):
     """
-    Orients the robot to a target yaw angle using only outer wheel turns.
+    Orients the robot to a target yaw angle.
     Args:
         target_yaw_radians (float): The desired yaw angle in radians (-pi to pi).
+        spin_in_place (bool): If True, spins in place (one wheel forward, one backward).
+                              If False (default), pivots using one stationary wheel.
     """
     global yaw_angle, last_time
 
-    print(f"Orienting robot to {target_yaw_radians:.2f} rad ({target_yaw_radians * 180/pi:.2f} deg)...")
+    print(f"Orienting robot to {target_yaw_radians:.2f} rad ({target_yaw_radians * 180/pi:.2f} deg){' (Spin in Place)' if spin_in_place else ''}...")
     
     # Normalize target angle for consistency
     target_yaw_radians = normalize_angle_rad(target_yaw_radians)
@@ -425,17 +427,25 @@ def orient_robot(target_yaw_radians):
         current_yaw_normalized = normalize_angle_rad(yaw_angle)
         angle_diff = get_shortest_angle_difference_rad(current_yaw_normalized, target_yaw_radians)
 
-        # Corrected motor control logic for turning.
-        # If angle_diff > 0, target is counter-clockwise (Left) relative to current.
-        # If angle_diff < 0, target is clockwise (Right) relative to current.
-        if angle_diff > 0: # Need to turn counter-clockwise (Left)
-            set_motor_speed(motor1_pwm, motor1_in2_pin, 0)          # Left wheel stopped
-            set_motor_speed(motor2_pwm, motor2_in2_pin, TURN_SPEED) # Right wheel forward
-            turn_direction_str = "LEFT (CCW)"
-        else: # Need to turn clockwise (Right)
-            set_motor_speed(motor1_pwm, motor1_in2_pin, TURN_SPEED) # Left wheel forward
-            set_motor_speed(motor2_pwm, motor2_in2_pin, 0)          # Right wheel stopped
-            turn_direction_str = "RIGHT (CW)"
+        if spin_in_place:
+            # Spin in place: one wheel forward, one backward
+            if angle_diff > 0: # Need to turn counter-clockwise (Left)
+                set_motor_speed(motor1_pwm, motor1_in2_pin, -TURN_SPEED) # Left wheel backward
+                set_motor_speed(motor2_pwm, motor2_in2_pin, TURN_SPEED)  # Right wheel forward
+                turn_direction_str = "LEFT (CCW) - Spin"
+            else: # Need to turn clockwise (Right)
+                set_motor_speed(motor1_pwm, motor1_in2_pin, TURN_SPEED)  # Left wheel forward
+                set_motor_speed(motor2_pwm, motor2_in2_pin, -TURN_SPEED) # Right wheel backward
+                turn_direction_str = "RIGHT (CW) - Spin"
+        else: # Original pivot turn behavior
+            if angle_diff > 0: # Need to turn counter-clockwise (Left)
+                set_motor_speed(motor1_pwm, motor1_in2_pin, 0)          # Left wheel stopped
+                set_motor_speed(motor2_pwm, motor2_in2_pin, TURN_SPEED) # Right wheel forward
+                turn_direction_str = "LEFT (CCW) - Pivot"
+            else: # Need to turn clockwise (Right)
+                set_motor_speed(motor1_pwm, motor1_in2_pin, TURN_SPEED) # Left wheel forward
+                set_motor_speed(motor2_pwm, motor2_in2_pin, 0)          # Right wheel stopped
+                turn_direction_str = "RIGHT (CW) - Pivot"
 
         # Update yaw angle
         gyro = mpu.get_gyro()
@@ -483,108 +493,126 @@ def run_line_follower():
             dist = read_distance(trig, echo)
             
             # --- Obstacle Detection Logic ---
-            if dist != -1 and dist < OBSTACLE_DISTANCE_CM:
-                if not obstacle_detected_flag:
-                    stop_motors()
-                    print("\n!!! OBSTACLE DETECTED! Stopping. !!!")
+            is_obstacle_currently_present = (dist != -1 and dist < OBSTACLE_DISTANCE_CM)
+
+            if is_obstacle_currently_present:
+                if not obstacle_detected_flag: # Obstacle just appeared
                     obstacle_detected_flag = True
-            else:
-                if obstacle_detected_flag:
-                    print("--- Obstacle removed. Resuming. ---")
-                    obstacle_detected_flag = False
-
-            if obstacle_detected_flag:
-                # If obstacle detected, keep motors stopped and continue to next loop iteration
-                sleep_ms(50) # Small delay to prevent busy-waiting
-                continue # Skip the rest of the loop if obstacle is present
+                    stop_motors() # Ensure motors are stopped before turning
+                    print("\n!!! OBSTACLE DETECTED! Performing 180-degree spin in place. !!!")
+                    target_yaw_180 = normalize_angle_rad(yaw_angle + pi)
+                    # Perform the 180-degree turn by spinning in place
+                    orient_robot(target_yaw_180, spin_in_place=True) 
+                    
+                    # After performing the turn, we assume the obstacle is handled (it's now behind us)
+                    # The flag should be reset to allow the robot to continue line following
+                    obstacle_detected_flag = False 
+                    # No 'continue' here, as we want to proceed with line following immediately after turn
             
-            # Button state
-            button_pressed = button.value() == 0
+            # If an obstacle was detected and handled by turning, the flag is now False.
+            # If an obstacle was NOT detected, the flag remains False.
+            # If the flag was true (robot was previously stopped for an obstacle) but now no obstacle, then clear it.
+            # This handles cases where obstacle disappears without a full turn being needed (e.g., fleeting detection)
+            if not is_obstacle_currently_present and obstacle_detected_flag:
+                print("--- Obstacle removed. Resuming. ---")
+                obstacle_detected_flag = False
             
-            # Activate electromagnet
-            if button.value() == 1:
-                electromagnet.off()
-            else:
-                electromagnet.on()
-            
-            ir_values = [pin.value() for pin in ir_pins] # Read all IR sensor values
-            error = 0
-            weights = [-2, -1, 0, 1, 2] # Weights for error calculation
+            # This main block only executes if no obstacle is currently preventing movement
+            if not obstacle_detected_flag:
+                # Button state
+                button_pressed = button.value() == 0
+                
+                # Activate electromagnet
+                if button.value() == 1:
+                    electromagnet.off()
+                else:
+                    electromagnet.on()
+                
+                ir_values = [pin.value() for pin in ir_pins] # Read all IR sensor values
+                error = 0
+                weights = [-2, -1, 0, 1, 2] # Weights for error calculation
 
-            num_active_sensors = 0
-            weighted_sum = 0
+                num_active_sensors = 0
+                weighted_sum = 0
 
-            # Calculate error based on active IR sensors
-            for i, sensor_value in enumerate(ir_values):
-                if sensor_value == 0: # Assuming 0 means line detected (dark line on light background)
-                    weighted_sum += weights[i]
-                    num_active_sensors += 1
+                # Calculate error based on active IR sensors
+                for i, sensor_value in enumerate(ir_values):
+                    if sensor_value == 0: # Assuming 0 means line detected (dark line on light background)
+                        weighted_sum += weights[i]
+                        num_active_sensors += 1
 
-            # --- Node Detection Logic with Cooldown ---
-            # Now using the more robust detection function
-            if is_node_detected_robust(ir_values, num_active_sensors):
-                # Check if enough time has passed since the last node detection
-                if (current_time - last_node_detection_time) >= NODE_DETECTION_COOLDOWN_MS:
-                    stop_motors()
-                    print("\n*** NODE DETECTED! Stopping briefly. ***")
-                    sleep_ms(NODE_STOP_TIME_MS)
-                    last_node_detection_time = current_time # Update last detection time
-
-                    # Check if we are still on the path
-                    if current_path_idx < len(calculated_path) - 1:
-                        current_node_name = calculated_path[current_path_idx]
-                        next_node_name = calculated_path[current_path_idx + 1]
-                        
-                        direction_to_next = get_direction_between_nodes(current_node_name, next_node_name, corrected_weighted_grid)
-                        
-                        if direction_to_next and direction_to_next in TARGET_YAW_ANGLES:
-                            target_yaw = TARGET_YAW_ANGLES[direction_to_next]
-                            print(f"Current node: {current_node_name}, Next node: {next_node_name}")
-                            print(f"Required turn direction: {direction_to_next}, Target Yaw: {target_yaw * 180/pi:.2f} deg")
-                            orient_robot(target_yaw) # Orient the robot
-                            current_path_idx += 1 # Advance to the next node in the path
-                        else:
-                            print(f"Warning: Could not determine direction from {current_node_name} to {next_node_name} or direction is not recognized.")
-                            current_path_idx += 1 # Still advance, to avoid getting stuck at this node
-                    elif current_path_idx == len(calculated_path) - 1:
-                        print("*** GOAL NODE REACHED! ***")
+                # --- Node Detection Logic with Cooldown ---
+                # Now using the more robust detection function
+                if is_node_detected_robust(ir_values, num_active_sensors):
+                    # Check if enough time has passed since the last node detection
+                    if (current_time - last_node_detection_time) >= NODE_DETECTION_COOLDOWN_MS:
                         stop_motors()
-                        # Optionally, add a behavior for reaching the goal, e.g., electromagnet action, sound.
-                        while True: # Keep robot stopped at goal
-                            sleep(1) # Sleep indefinitely or until reset
-                    else:
-                        # This case should ideally not be reached if logic is sound,
-                        # but it covers scenarios where a node is detected beyond the end of the path.
-                        print("Node detected, but path already completed or index out of bounds.")
-                        stop_motors() # Stop to prevent unexpected movement
+                        print("\n*** NODE DETECTED! Stopping briefly. ***")
+                        sleep_ms(NODE_STOP_TIME_MS)
+                        last_node_detection_time = current_time # Update last detection time
 
-                    # After node handling (orientation or goal reached), line following will resume naturally
-                    # or the robot will stay stopped if at the goal.
+                        # Check if we are still on the path
+                        if current_path_idx < len(calculated_path) - 1:
+                            current_node_name = calculated_path[current_path_idx]
+                            next_node_name = calculated_path[current_path_idx + 1]
+                            
+                            direction_to_next = get_direction_between_nodes(current_node_name, next_node_name, corrected_weighted_grid)
+                            
+                            if direction_to_next and direction_to_next in TARGET_YAW_ANGLES:
+                                target_yaw = TARGET_YAW_ANGLES[direction_to_next]
+                                print(f"Current node: {current_node_name}, Next node: {next_node_name}")
+                                print(f"Required turn direction: {direction_to_next}, Target Yaw: {target_yaw * 180/pi:.2f} deg")
+                                orient_robot(target_yaw) # Orient the robot
+                                current_path_idx += 1 # Advance to the next node in the path
+                            else:
+                                print(f"Warning: Could not determine direction from {current_node_name} to {next_node_name} or direction is not recognized.")
+                                current_path_idx += 1 # Still advance, to avoid getting stuck at this node
+                        elif current_path_idx == len(calculated_path) - 1:
+                            print("*** GOAL NODE REACHED! ***")
+                            stop_motors()
+                            # Optionally, add a behavior for reaching the goal, e.g., electromagnet action, sound.
+                            while True: # Keep robot stopped at goal
+                                sleep(1) # Sleep indefinitely or until reset
+                        else:
+                            # This case should ideally not be reached if logic is sound,
+                            # but it covers scenarios where a node is detected beyond the end of the path.
+                            print("Node detected, but path already completed or index out of bounds.")
+                            stop_motors() # Stop to prevent unexpected movement
 
-            # Continue with line following if not at goal or if orientation is complete AND no obstacle
-            if num_active_sensors > 0:
-                error = weighted_sum / num_active_sensors
-            else: # If line is lost, continue moving forward
-                print("Line lost! Continuing forwards.")
-                set_motor_speed(motor1_pwm, motor1_in2_pin, BASE_SPEED)
-                set_motor_speed(motor2_pwm, motor2_in2_pin, BASE_SPEED)
-                sleep_ms(100) # Small delay to allow the robot to move forward a bit
-                continue # Skip the rest of the loop and try to find the line again in the next iteration
+                        # After node handling (orientation or goal reached), line following will resume naturally
+                        # or the robot will stay stopped if at the goal.
 
-            correction = int(error * KP)
+                # Continue with line following if not at goal or if orientation is complete
+                if num_active_sensors > 0:
+                    error = weighted_sum / num_active_sensors
+                else: # If line is lost, continue moving forward
+                    print("Line lost! Continuing forwards.")
+                    set_motor_speed(motor1_pwm, motor1_in2_pin, BASE_SPEED)
+                    set_motor_speed(motor2_pwm, motor2_in2_pin, BASE_SPEED)
+                    sleep_ms(100) # Small delay to allow the robot to move forward a bit
+                    continue # Skip the rest of the loop and try to find the line again in the next iteration
 
-            left_speed = BASE_SPEED - correction
-            right_speed = BASE_SPEED + correction
+                correction = int(error * KP)
 
-            # Ensure speeds are within valid range (0-1023)
-            left_speed = max(0, min(left_speed, 1023))
-            right_speed = max(0, min(right_speed, 1023))
+                left_speed = BASE_SPEED - correction
+                right_speed = BASE_SPEED + correction
 
-            set_motor_speed(motor1_pwm, motor1_in2_pin, left_speed)
-            set_motor_speed(motor2_pwm, motor2_in2_pin, right_speed)
+                # Ensure speeds are within valid range (0-1023)
+                left_speed = max(0, min(left_speed, 1023))
+                right_speed = max(0, min(right_speed, 1023))
+
+                set_motor_speed(motor1_pwm, motor1_in2_pin, left_speed)
+                set_motor_speed(motor2_pwm, motor2_in2_pin, right_speed)
+
+            else:
+                # If obstacle_detected_flag is still True at this point, it means an obstacle is still present
+                # (e.g., if the turn didn't fully clear it, or if it reappeared immediately after turn)
+                stop_motors()
+                sleep_ms(50) # Small delay to prevent busy-waiting while waiting for obstacle to clear
+
 
             # Print current robot state for debugging
-            print("\n--- Line Following ---")
+            print("\n--- Current Robot State ---")
             print("IR Sensors:", ir_values)
             print("Error:", error)
             print("Correction:", correction)
@@ -594,6 +622,7 @@ def run_line_follower():
             print("Distance: {:.2f} cm".format(dist) if dist != -1 else "Ultrasonic: Timeout")
             print("Button Pressed:", button_pressed)
             print("Yaw angle (deg): {:.2f}".format(yaw_angle * 180/pi))
+            print("Obstacle Detected Flag:", obstacle_detected_flag)
             
             sleep_ms(20) # Small delay to stabilize readings and prevent busy-waiting
 
