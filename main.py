@@ -218,6 +218,9 @@ NODE_STOP_TIME_MS = 500
 # Cooldown period for node detection (in ms)
 NODE_DETECTION_COOLDOWN_MS = 2000 # 2 seconds
 
+# ----- Obstacle Detection Parameters ---
+OBSTACLE_DISTANCE_CM = 5 # Distance threshold for obstacle detection in cm
+
 # ----- Path Planning Grid (Corrected and Weighted) -----
 corrected_weighted_grid = {
     # Parking spots (P nodes)
@@ -380,13 +383,14 @@ def is_node_detected_robust(ir_values, num_active_sensors):
     return False
 
 # --- Hardcoded Start and Goal Nodes ---
-START_NODE = "C3"
-GOAL_NODE = "B1"
+START_NODE = "C1"
+GOAL_NODE = "C3"
 
 # Global variables for yaw calculation and node detection cooldown
 yaw_angle = 0.0 # Yaw angle in radians
 last_time = ticks_ms()
 last_node_detection_time = 0 # Initialize for cooldown
+obstacle_detected_flag = False # New global flag for obstacle detection
 
 # Cardinal directions and their target yaw angles (in radians)
 # Assumes 'E' (East) is 0 radians, 'N' (North) is pi/2, 'S' (South) is -pi/2, 'W' (West) is pi.
@@ -443,7 +447,7 @@ def orient_robot(target_yaw_radians):
         yaw_angle += (gyro['z'] * (pi / 180.0)) * dt_loop
         yaw_angle = normalize_angle_rad(yaw_angle) # Keep yaw within -pi to pi
 
-        print(f"  Current Yaw: {current_yaw_normalized:.2f} rad ({current_yaw_normalized * 180/pi:.2f} deg), Target Yaw: {target_yaw_radians:.2f} rad, Diff: {angle_diff:.2f} rad, Turning: {turn_direction_str}")
+        # print(f"  Current Yaw: {current_yaw_normalized:.2f} rad ({current_yaw_normalized * 180/pi:.2f} deg), Target Yaw: {target_yaw_radians:.2f} rad, Diff: {angle_diff:.2f} rad, Turning: {turn_direction_str}")
         sleep_ms(50) # Small delay for MPU reading and motor response
         turn_count += 1
 
@@ -456,7 +460,7 @@ def orient_robot(target_yaw_radians):
 # ----- Line Following Control Loop -----
 def run_line_follower():
     """Main loop for line following and node detection and path navigation."""
-    global yaw_angle, last_time, current_path_idx, last_node_detection_time # Declare global to modify
+    global yaw_angle, last_time, current_path_idx, last_node_detection_time, obstacle_detected_flag # Declare global to modify
 
     # Global to track current position in path
     current_path_idx = 0 
@@ -477,6 +481,22 @@ def run_line_follower():
             
             # Ultrasonic distance
             dist = read_distance(trig, echo)
+            
+            # --- Obstacle Detection Logic ---
+            if dist != -1 and dist < OBSTACLE_DISTANCE_CM:
+                if not obstacle_detected_flag:
+                    stop_motors()
+                    print("\n!!! OBSTACLE DETECTED! Stopping. !!!")
+                    obstacle_detected_flag = True
+            else:
+                if obstacle_detected_flag:
+                    print("--- Obstacle removed. Resuming. ---")
+                    obstacle_detected_flag = False
+
+            if obstacle_detected_flag:
+                # If obstacle detected, keep motors stopped and continue to next loop iteration
+                sleep_ms(50) # Small delay to prevent busy-waiting
+                continue # Skip the rest of the loop if obstacle is present
             
             # Button state
             button_pressed = button.value() == 0
@@ -541,7 +561,7 @@ def run_line_follower():
                     # After node handling (orientation or goal reached), line following will resume naturally
                     # or the robot will stay stopped if at the goal.
 
-            # Continue with line following if not at goal or if orientation is complete
+            # Continue with line following if not at goal or if orientation is complete AND no obstacle
             if num_active_sensors > 0:
                 error = weighted_sum / num_active_sensors
             else: # If line is lost, continue moving forward
@@ -610,3 +630,4 @@ else:
 
 # Start the line following loop (robot will start moving after path is calculated and printed)
 run_line_follower()
+
