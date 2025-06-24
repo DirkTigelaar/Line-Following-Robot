@@ -380,8 +380,8 @@ def is_node_detected_robust(ir_values, num_active_sensors):
     return False
 
 # --- Hardcoded Start and Goal Nodes ---
-START_NODE = "E2"
-GOAL_NODE = "E1"
+START_NODE = "C3"
+GOAL_NODE = "B1"
 
 # Global variables for yaw calculation and node detection cooldown
 yaw_angle = 0.0 # Yaw angle in radians
@@ -544,11 +544,12 @@ def run_line_follower():
             # Continue with line following if not at goal or if orientation is complete
             if num_active_sensors > 0:
                 error = weighted_sum / num_active_sensors
-            else:
-                stop_motors()
-                print("Line lost! Stopping.")
-                sleep_ms(500)
-                continue # Skip the rest of the loop and try again
+            else: # If line is lost, continue moving forward
+                print("Line lost! Continuing forwards.")
+                set_motor_speed(motor1_pwm, motor1_in2_pin, BASE_SPEED)
+                set_motor_speed(motor2_pwm, motor2_in2_pin, BASE_SPEED)
+                sleep_ms(100) # Small delay to allow the robot to move forward a bit
+                continue # Skip the rest of the loop and try to find the line again in the next iteration
 
             correction = int(error * KP)
 
@@ -567,14 +568,14 @@ def run_line_follower():
             print("IR Sensors:", ir_values)
             print("Error:", error)
             print("Correction:", correction)
-            print(f"Left Speed: {left_speed}, Right Speed: {right_speed}") # FIXED: changed 're_speed' to 'right_speed'
+            print(f"Left Speed: {left_speed}, Right Speed: {right_speed}")
             print("Encoder 1 Count:", position1)
             print("Encoder 2 Count:", position2)
             print("Distance: {:.2f} cm".format(dist) if dist != -1 else "Ultrasonic: Timeout")
             print("Button Pressed:", button_pressed)
-            print("Yaw angle (deg): {:.2f}".format(yaw_angle * 180/pi)) # Convert back to degrees for display
+            print("Yaw angle (deg): {:.2f}".format(yaw_angle * 180/pi))
             
-            sleep_ms(100) # Small delay to stabilize readings and prevent busy-waiting
+            sleep_ms(20) # Small delay to stabilize readings and prevent busy-waiting
 
     except KeyboardInterrupt:
         print("Program interrupted by user.")
