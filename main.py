@@ -419,8 +419,8 @@ def is_node_detected_robust(ir_values, num_active_sensors):
     return False
 
 # --- Hardcoded Start and Goal Nodes ---
-START_NODE = "C1"
-GOAL_NODE = "C3"
+START_NODE = "E6"
+GOAL_NODE = "C1"
 
 # Global variables for yaw calculation and node detection cooldown
 yaw_angle = 0.0 # Yaw angle in radians
@@ -530,32 +530,50 @@ def run_line_follower():
                     stop_motors() # Ensure motors are stopped before turning
                     print("\n!!! OBSTACLE DETECTED! Performing 180-degree spin in place and recalculating path. !!!")
 
-                    # Identify the node that was supposed to be reached next
-                    # This assumes the obstacle is between the current node (at current_path_idx)
-                    # and the next node (at current_path_idx + 1).
-                    if current_path_idx < len(calculated_path) - 1:
-                        node_before_obstacle = calculated_path[current_path_idx]
-                        node_after_obstacle = calculated_path[current_path_idx + 1]
-                        
-                        # Increase the weight of the path segment to effectively block it
-                        if not block_path_segment_by_weight(node_before_obstacle, node_after_obstacle, corrected_weighted_grid, new_weight=1000.0):
-                             print(f"Warning: Could not find or block segment from {node_before_obstacle} to {node_after_obstacle}.")
-                    else:
-                        # This case means an obstacle was detected when at or near the goal,
-                        # or on the very last segment. Handle accordingly, perhaps just stop.
-                        print("Obstacle detected near end of path or path too short to determine blocked segment. Stopping.")
-                        stop_motors()
-                        sleep(5) # Pause for 5 seconds to signify issue
-                        return # Exit the loop, robot is stuck or at goal with obstacle
+                    # Determine the segment that is blocked by the obstacle based on the current_path_idx
+                    # current_path_idx here indicates the target node the robot is currently moving towards.
+                    blocked_segment_start_node = None
+                    blocked_segment_end_node = None
 
+                    # If current_path_idx is 0, the robot is trying to move from START_NODE to calculated_path[0].
+                    # The obstacle is on this very first segment.
+                    if current_path_idx == 0:
+                        blocked_segment_start_node = START_NODE
+                        if len(calculated_path) > 0: # Ensure there's a target node
+                            blocked_segment_end_node = calculated_path[0]
+                    else:
+                        # If current_path_idx > 0, it means the robot has successfully passed
+                        # calculated_path[current_path_idx - 1] and is now trying to move
+                        # towards calculated_path[current_path_idx].
+                        # The obstacle is detected on the segment from calculated_path[current_path_idx - 1]
+                        # to calculated_path[current_path_idx].
+                        if current_path_idx < len(calculated_path): # Ensure current_path_idx is a valid target node
+                            blocked_segment_start_node = calculated_path[current_path_idx - 1]
+                            blocked_segment_end_node = calculated_path[current_path_idx]
+                        else:
+                            # This scenario means current_path_idx is beyond the end of the calculated_path,
+                            # implying the robot is at or past the goal, or path is invalid.
+                            print("Warning: Obstacle detected but robot is at or beyond goal node's index. Cannot block a specific segment.")
+                            stop_motors()
+                            sleep(5)
+                            return # Exit to avoid errors or endless loop
+
+
+                    if blocked_segment_start_node and blocked_segment_end_node:
+                        # Increase the weight of the path segment to effectively block it
+                        if not block_path_segment_by_weight(blocked_segment_start_node, blocked_segment_end_node, corrected_weighted_grid, new_weight=1000.0):
+                             print(f"Warning: Could not find or block segment from {blocked_segment_start_node} to {blocked_segment_end_node}.")
+                    else:
+                        print("Warning: Could not determine valid segment to block due to path length or index issues. Proceeding with recalculation anyway.")
+                        # Even if no specific segment is blocked, we still try to recalculate the path.
+                        
                     # Perform the 180-degree turn
                     target_yaw_180 = normalize_angle_rad(yaw_angle + pi)
                     orient_robot(target_yaw_180, spin_in_place=True) 
                     
-                    # Recalculate path from the current node to the goal using the modified grid
-                    # The robot's *current logical node* is still `calculated_path[current_path_idx]`
-                    # since it never actually reached the next node due to the obstacle.
-                    current_robot_node = calculated_path[current_path_idx]
+                    # Recalculate path from the last successfully reached node to the goal.
+                    # This corresponds to blocked_segment_start_node.
+                    current_robot_node = blocked_segment_start_node 
                     
                     # Recalculate the path. The find_path_dijkstra now uses the grid with increased weights.
                     new_calculated_path = find_path_dijkstra(current_robot_node, GOAL_NODE, corrected_weighted_grid)
@@ -567,17 +585,17 @@ def run_line_follower():
                     else:
                         print(f"New path calculated: {new_calculated_path}")
                         calculated_path = new_calculated_path
-                        current_path_idx = 0 # Reset path index to start of new path
+                        # Reset path index based on the new current_robot_node
+                        try:
+                            current_path_idx = calculated_path.index(current_robot_node)
+                        except ValueError:
+                            # This should ideally not happen if current_robot_node is in the new path
+                            print("Warning: Last reached node not found in new path. Resetting index to 0.")
+                            current_path_idx = 0 
                         
-                        # After recalculating, re-orient to the new first segment if it exists
-                        if len(calculated_path) > 1:
-                            new_initial_direction = get_direction_between_nodes(calculated_path[0], calculated_path[1], corrected_weighted_grid)
-                            if new_initial_direction and new_initial_direction in TARGET_YAW_ANGLES:
-                                new_target_yaw = TARGET_YAW_ANGLES[new_initial_direction]
-                                print(f"Re-orienting to {new_target_yaw * 180/pi:.2f} deg based on new path direction '{new_initial_direction}'.")
-                                orient_robot(new_target_yaw, spin_in_place=True) # Always spin in place after obstacle
-                            else:
-                                print("Warning: Could not determine direction for new path's first segment. Continuing.")
+                        # --- REMOVED: Immediate re-orientation after recalculation. Robot will now line-follow. ---
+                        # The robot will now naturally proceed to line-follow on the new path.
+                        # The re-orientation for the next segment will happen when it detects the next node.
                         
                         obstacle_detected_flag = False # Reset flag to allow normal operation
             
@@ -620,6 +638,15 @@ def run_line_follower():
                         stop_motors()
                         print("\n*** NODE DETECTED! Stopping briefly. ***")
                         sleep_ms(NODE_STOP_TIME_MS)
+                        
+                        # --- MODIFICATION: Drive forward for 1 second to clear the node ---
+                        print("Driving forward for 1 second to clear node with wheels...")
+                        set_motor_speed(motor1_pwm, motor1_in2_pin, BASE_SPEED)
+                        set_motor_speed(motor2_pwm, motor2_in2_pin, BASE_SPEED)
+                        sleep(1) # Drive forward for 1 second
+                        stop_motors() # Stop after driving forward
+                        # --- END MODIFICATION ---
+
                         last_node_detection_time = current_time # Update last detection time
 
                         # Check if we are still on the path
@@ -696,6 +723,7 @@ def run_line_follower():
             print("Obstacle Detected Flag:", obstacle_detected_flag)
             print("Current Path Index:", current_path_idx)
             if calculated_path:
+                # The displayed "Current Logical Node" here refers to the target node of the segment being traversed
                 print("Current Logical Node:", calculated_path[current_path_idx] if current_path_idx < len(calculated_path) else "At Goal or Beyond")
             # The 'blocked_path_segments' is no longer used for dynamic blocking in this version,
             # as blocking is now done via increasing edge weights directly in corrected_weighted_grid.
@@ -736,4 +764,3 @@ else:
 
 # Start the line following loop (robot will start moving after path is calculated and printed)
 run_line_follower()
-
