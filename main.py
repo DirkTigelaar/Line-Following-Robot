@@ -216,7 +216,7 @@ MAX_CORRECTION = 200
 # Threshold for number of active sensors to consider it a node
 NODE_SENSOR_THRESHOLD = 3 
 # Time to stop at a node (in ms)
-NODE_STOP_TIME_MS = 500 
+NODE_STOP_TIME_MS = 750 # Increased from 500ms
 # Cooldown period for node detection (in ms)
 NODE_DETECTION_COOLDOWN_MS = 2000 # 2 seconds
 
@@ -397,13 +397,28 @@ def is_node_detected_robust(ir_values, num_active_sensors):
     Returns:
         bool: True if a node is detected, False otherwise.
     """
-    # Pattern for T-junctions or intersections (many sensors on line)
-    # This captures wide lines.
-    if num_active_sensors >= NODE_SENSOR_THRESHOLD:
+    # Pattern 1: A significant number of sensors are active, indicating a wide line or intersection.
+    # This is useful for '+' intersections or very wide 'T' junctions.
+    if num_active_sensors >= NODE_SENSOR_THRESHOLD: # NODE_SENSOR_THRESHOLD is 3
+        return True
+
+    # Pattern 2: Detects a clear T-junction or 90-degree turn to the left.
+    # Left-outer, left-inner, and center sensors are on the line.
+    # This implies the robot is approaching a left turn from the main line.
+    if ir_values[0] == 0 and ir_values[1] == 0 and ir_values[2] == 0:
+        return True
+    
+    # Pattern 3: Detects a clear T-junction or 90-degree turn to the right.
+    # Right-outer, right-inner, and center sensors are on the line.
+    # This implies the robot is approaching a right turn from the main line.
+    if ir_values[2] == 0 and ir_values[3] == 0 and ir_values[4] == 0:
+        return True
+    
+    # Pattern 4: All sensors are on the line. This is a strong indicator of a major intersection.
+    if ir_values == [0, 0, 0, 0, 0]:
         return True
 
     # Pattern for a distinct side road to the left (leftmost and center on line, rightmost off)
-    # This helps catch 90-degree turns that might not activate many sensors for long
     if ir_values[0] == 0 and ir_values[2] == 0 and ir_values[4] == 1:
         return True
     
@@ -419,8 +434,8 @@ def is_node_detected_robust(ir_values, num_active_sensors):
     return False
 
 # --- Hardcoded Start and Goal Nodes ---
-START_NODE = "E6"
-GOAL_NODE = "C1"
+START_NODE = "C3"
+GOAL_NODE = "D2"
 
 # Global variables for yaw calculation and node detection cooldown
 yaw_angle = 0.0 # Yaw angle in radians
@@ -443,7 +458,7 @@ TARGET_YAW_ANGLES = {
 
 TURN_SPEED = 600 # Speed for turning (adjust as needed for controlled turns, increased from 200)
 # Yaw tolerance: now 10 degrees on each side
-YAW_TOLERANCE = 10.0 * (pi / 180.0) # Converted from 10 degrees to radians for precision
+YAW_TOLERANCE = 2.0 * (pi / 180.0) # Converted from 10 degrees to radians for precision
 
 def orient_robot(target_yaw_radians, spin_in_place=True):
     """
@@ -637,7 +652,7 @@ def run_line_follower():
                     if (current_time - last_node_detection_time) >= NODE_DETECTION_COOLDOWN_MS:
                         stop_motors()
                         print("\n*** NODE DETECTED! Stopping briefly. ***")
-                        sleep_ms(NODE_STOP_TIME_MS)
+                        sleep_ms(NODE_STOP_TIME_MS) # Uses the updated NODE_STOP_TIME_MS
                         
                         # --- MODIFICATION: Drive forward for 1 second to clear the node ---
                         print("Driving forward for 1 second to clear node with wheels...")
@@ -764,3 +779,5 @@ else:
 
 # Start the line following loop (robot will start moving after path is calculated and printed)
 run_line_follower()
+
+
