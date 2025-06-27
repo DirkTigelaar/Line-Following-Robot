@@ -172,11 +172,11 @@ ir_pins = [
 pin_a1 = Pin(25, Pin.IN, Pin.PULL_UP)
 pin_b1 = Pin(26, Pin.IN, Pin.PULL_UP)
 
-pin_a2 = Pin(17, Pin.IN, Pin.PULL_UP)
-pin_b2 = Pin(16, Pin.IN, Pin.PULL_UP)
-
 position1 = 0
 last_state1 = pin_a1.value()
+
+pin_a2 = Pin(17, Pin.IN, Pin.PULL_UP)
+pin_b2 = Pin(16, Pin.IN, Pin.PULL_UP)
 
 position2 = 0
 last_state2 = pin_a2.value()
@@ -435,7 +435,7 @@ def is_node_detected_robust(ir_values, num_active_sensors):
 
 # --- Hardcoded Start and Goal Nodes ---
 START_NODE = "C3"
-GOAL_NODE = "D2"
+GOAL_NODE = "C1"
 
 # Global variables for yaw calculation and node detection cooldown
 yaw_angle = 0.0 # Yaw angle in radians
@@ -626,12 +626,18 @@ def run_line_follower():
                 # Button state
                 button_pressed = button.value() == 0
                 
-                # Activate electromagnet
-                if button.value() == 1:
-                    electromagnet.off()
-                else:
-                    electromagnet.on()
-                
+                # --- NEW: Button pressed logic for electromagnet and robot stop ---
+                if button_pressed:
+                    print("Button pressed! Activating electromagnet and stopping robot for 3 seconds.")
+                    electromagnet.on()  # Turn electromagnet ON
+                    stop_motors()       # Stop the robot
+                    sleep(3)            # Wait for 3 seconds
+                    electromagnet.off() # Turn electromagnet OFF after stopping
+                    print("Resuming robot movement.")
+                    # After the delay, the loop will continue, and the robot will resume line following
+                    # based on the current state.
+                # --- END NEW ---
+
                 ir_values = [pin.value() for pin in ir_pins] # Read all IR sensor values
                 error = 0
                 weights = [-2, -1, 0, 1, 2] # Weights for error calculation
@@ -696,26 +702,27 @@ def run_line_follower():
                         # or the robot will stay stopped if at the goal.
 
                 # Continue with line following if not at goal or if orientation is complete
-                if num_active_sensors > 0:
-                    error = weighted_sum / num_active_sensors
-                else: # If line is lost, continue moving forward
-                    print("Line lost! Continuing forwards.")
-                    set_motor_speed(motor1_pwm, motor1_in2_pin, BASE_SPEED)
-                    set_motor_speed(motor2_pwm, motor2_in2_pin, BASE_SPEED)
-                    sleep_ms(100) # Small delay to allow the robot to move forward a bit
-                    continue # Skip the rest of the loop and try to find the line again in the next iteration
+                if not button_pressed: # Only line-follow if the button is NOT pressed
+                    if num_active_sensors > 0:
+                        error = weighted_sum / num_active_sensors
+                    else: # If line is lost, continue moving forward
+                        print("Line lost! Continuing forwards.")
+                        set_motor_speed(motor1_pwm, motor1_in2_pin, BASE_SPEED)
+                        set_motor_speed(motor2_pwm, motor2_in2_pin, BASE_SPEED)
+                        sleep_ms(100) # Small delay to allow the robot to move forward a bit
+                        continue # Skip the rest of the loop and try to find the line again in the next iteration
 
-                correction = int(error * KP)
+                    correction = int(error * KP)
 
-                left_speed = BASE_SPEED - correction
-                right_speed = BASE_SPEED + correction
+                    left_speed = BASE_SPEED - correction
+                    right_speed = BASE_SPEED + correction
 
-                # Ensure speeds are within valid range (0-1023)
-                left_speed = max(0, min(left_speed, 1023))
-                right_speed = max(0, min(right_speed, 1023))
+                    # Ensure speeds are within valid range (0-1023)
+                    left_speed = max(0, min(left_speed, 1023))
+                    right_speed = max(0, min(right_speed, 1023))
 
-                set_motor_speed(motor1_pwm, motor1_in2_pin, left_speed)
-                set_motor_speed(motor2_pwm, motor2_in2_pin, right_speed)
+                    set_motor_speed(motor1_pwm, motor1_in2_pin, left_speed)
+                    set_motor_speed(motor2_pwm, motor2_in2_pin, right_speed)
 
             else:
                 # If obstacle_detected_flag is still True at this point, it means an obstacle is still present
@@ -778,6 +785,5 @@ else:
     yaw_angle = 0.0 # Default for single-node paths
 
 # Start the line following loop (robot will start moving after path is calculated and printed)
-run_line_follower()
-
+run_line_follower() 
 
