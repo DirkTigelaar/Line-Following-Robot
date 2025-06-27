@@ -787,7 +787,7 @@ def run_line_follower():
 
                             if num_active_sensors_reverse > 0: # Line detected, apply line following
                                 weighted_sum_reverse = sum(weights[i] for i, val in enumerate(ir_values_reverse) if val == 0)
-                                current_error_reverse = weighted_sum_reverse / num_active_sensors_reverse
+                                current_error_reverse = weighted_sum_reverse # Changed to direct sum
                                 
                                 # PID calculation for backward line following
                                 integral_lf += current_error_reverse * dt_loop_rev
@@ -962,7 +962,7 @@ def run_line_follower():
 
                                     if num_active_sensors_reverse_delivery > 0:
                                         weighted_sum_reverse_delivery = sum(weights[i] for i, val in enumerate(ir_values_reverse_delivery) if val == 0)
-                                        current_error_reverse_delivery = weighted_sum_reverse_delivery / num_active_sensors_reverse_delivery
+                                        current_error_reverse_delivery = weighted_sum_reverse_delivery # Changed to direct sum
                                         
                                         # PID calculation for backward line following
                                         integral_lf += current_error_reverse_delivery * dt_loop_rev_del
@@ -1098,7 +1098,7 @@ def run_line_follower():
                 # Continue with line following if not at goal, not handling obstacle, and not waiting for button
                 if not button_pressed or not (current_mission_state == MISSION_STATE_PICKUP and calculated_path[current_path_idx] == current_pickup_node):
                     if num_active_sensors > 0:
-                        error = weighted_sum / num_active_sensors
+                        error = weighted_sum # Changed to direct sum
 
                         # PID calculation for forward line following
                         integral_lf += error * dt_loop_lf # Use local dt
