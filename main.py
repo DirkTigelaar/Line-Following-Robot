@@ -25,6 +25,7 @@ motor2_pwm = PWM(motor2_in1_pin)
 motor2_pwm.freq(1000)
 
 BASE_SPEED = 500
+REVERSE_SPEED = 400 # Adjusted speed for backward line following
 
 def set_motor_speed(motor_pwm_obj, motor_in2_pin_obj, speed):
     """
@@ -215,7 +216,7 @@ MAX_CORRECTION = 200
 
 # ----- Node Detection Parameters ---
 # Threshold for number of active sensors to consider it a node
-NODE_SENSOR_THRESHOLD = 3 
+NODE_SENSOR_THRESHOLD = 3
 # Time to stop at a node (in ms)
 NODE_STOP_TIME_MS = 750
 # Cooldown period for node detection (in ms)
@@ -379,7 +380,7 @@ def block_path_segment_by_weight(node1, node2, grid, new_weight=1000.0):
     # Block path from node2 to node1 (for bidirectional segments)
     for direction, info in grid[node2].items():
         if info and info[0] == node1:
-            grid[node2][direction] = (node1, new_weight)
+            grid[2][direction] = (node1, new_weight)
             print(f"Path from {node2} to {node1} ({direction}) weight increased to {new_weight}")
             found_and_blocked = True
             break
@@ -472,55 +473,59 @@ TARGET_YAW_ANGLES = {
     'W': pi          # 180 degrees
 }
 
-TURN_SPEED = 600 # Speed for turning (adjust as needed for controlled turns, increased from 200)
-# Yaw tolerance: now 10 degrees on each side
-YAW_TOLERANCE = 2.0 * (pi / 180.0) # Converted from 10 degrees to radians for precision
+TURN_SPEED = 600 # Maximum speed for turning (adjust as needed for controlled turns)
+KP_TURN = 250 # Proportional gain for orientation turns. Tunable.
+# Yaw tolerance: now 2 degrees on each side
+YAW_TOLERANCE = 2.0 * (pi / 180.0) # Converted from 2 degrees to radians for precision
 
 def orient_robot(target_yaw_radians, spin_in_place=True):
     """
-    Orients the robot to a target yaw angle.
+    Orients the robot to a target yaw angle using proportional control.
     Args:
         target_yaw_radians (float): The desired yaw angle in radians (-pi to pi).
         spin_in_place (bool): If True, spins in place (one wheel forward, one backward).
-                              If False, pivots using one stationary wheel.
                               For this modification, we will force spin_in_place to be True.
     """
     global yaw_angle, last_time
 
     print(f"Orienting robot to {target_yaw_radians:.2f} rad ({target_yaw_radians * 180/pi:.2f} deg) (Spin in Place)...")
     
-    # Normalize target angle for consistency
     target_yaw_radians = normalize_angle_rad(target_yaw_radians)
 
     turn_count = 0
-    max_turn_attempts = 300 # Safety limit to prevent endless loop during turning
+    max_turn_attempts = 500 # Increased attempts for safety if turn is slow
+
+    # Re-initialize last_time for this specific turn operation for accurate dt
+    last_time_turn_loop = ticks_ms()
 
     while abs(get_shortest_angle_difference_rad(yaw_angle, target_yaw_radians)) > YAW_TOLERANCE and turn_count < max_turn_attempts:
         current_yaw_normalized = normalize_angle_rad(yaw_angle)
         angle_diff = get_shortest_angle_difference_rad(current_yaw_normalized, target_yaw_radians)
 
-        # Always perform a spin in place
-        if angle_diff > 0: # Need to turn counter-clockwise (Left)
-            set_motor_speed(motor1_pwm, motor1_in2_pin, -TURN_SPEED) # Left wheel backward
-            set_motor_speed(motor2_pwm, motor2_in2_pin, TURN_SPEED)  # Right wheel forward
-            # turn_direction_str = "LEFT (CCW) - Spin"
-        else: # Need to turn clockwise (Right)
-            set_motor_speed(motor1_pwm, motor1_in2_pin, TURN_SPEED)  # Left wheel forward
-            set_motor_speed(motor2_pwm, motor2_in2_pin, -TURN_SPEED) # Right wheel backward
-            # turn_direction_str = "RIGHT (CW) - Spin"
+        # Proportional control for turning
+        # The further away from target, the higher the power
+        turn_power = int(abs(angle_diff) * KP_TURN)
+        # Apply a minimum speed to overcome static friction, and clamp to max TURN_SPEED
+        turn_power = max(50, min(turn_power, TURN_SPEED)) 
+
+        if angle_diff > 0: # Need to turn counter-clockwise (Left) - Left wheel back, Right wheel forward
+            set_motor_speed(motor1_pwm, motor1_in2_pin, -turn_power)
+            set_motor_speed(motor2_pwm, motor2_in2_pin, turn_power)
+        else: # Need to turn clockwise (Right) - Left wheel forward, Right wheel back
+            set_motor_speed(motor1_pwm, motor1_in2_pin, turn_power)
+            set_motor_speed(motor2_pwm, motor2_in2_pin, -turn_power)
 
         # Update yaw angle
         gyro = mpu.get_gyro()
         current_time_loop = ticks_ms()
-        dt_loop = (current_time_loop - last_time) / 1000.0 # Time in seconds
-        last_time = current_time_loop
-        
+        dt_loop = (current_time_loop - last_time_turn_loop) / 1000.0 # Use local last_time for this loop
+        last_time_turn_loop = current_time_loop # Update local last_time
+
         # Integrate gyro Z (degrees/s) into yaw_angle (radians)
         yaw_angle += (gyro['z'] * (pi / 180.0)) * dt_loop
         yaw_angle = normalize_angle_rad(yaw_angle) # Keep yaw within -pi to pi
 
-        # print(f"  Current Yaw: {current_yaw_normalized:.2f} rad ({current_yaw_normalized * 180/pi:.2f} deg), Target Yaw: {target_yaw_radians:.2f} rad, Diff: {angle_diff:.2f} rad, Turning: {turn_direction_str}")
-        sleep_ms(50) # Small delay for MPU reading and motor response
+        sleep_ms(5) # Smaller sleep time for faster control loop within turn
         turn_count += 1
 
     stop_motors()
@@ -528,14 +533,8 @@ def orient_robot(target_yaw_radians, spin_in_place=True):
     if turn_count >= max_turn_attempts:
         print("Warning: Orientation reached max turn attempts. Might not be perfectly aligned.")
 
-
-def perform_180_turn():
-    """Performs a 180-degree turn in place."""
-    global yaw_angle
-    print("Performing 180-degree turn...")
-    target_yaw_180 = normalize_angle_rad(yaw_angle + pi)
-    orient_robot(target_yaw_180, spin_in_place=True)
-    print("180-degree turn complete.")
+    # After orientation, ensure global last_time is updated to prevent large dt jump in main loop
+    last_time = ticks_ms() # This syncs the global last_time after a potentially long orientation
 
 # ----- Line Following Control Loop -----
 def run_line_follower():
@@ -548,15 +547,19 @@ def run_line_follower():
     if MISSION_PLAN:
         current_pickup_node, current_delivery_node = MISSION_PLAN[current_mission_idx]
         print(f"\nStarting mission: Pick up from {current_pickup_node}")
-        # Initial path calculation for pickup
-        calculated_path = find_path_dijkstra("C3", current_pickup_node, corrected_weighted_grid) # Assuming C3 as starting point
+        
+        # Initial path calculation: From A1 to P1. The bot starts at A1 facing P1.
+        # This implies the first segment is A1 -> P1.
+        calculated_path = find_path_dijkstra("A1", current_pickup_node, corrected_weighted_grid) 
         print(f"Initial path to pickup {current_pickup_node}: {calculated_path}")
         if calculated_path:
             current_path_idx = 0
+            # If the path is just the pickup node, we are already there or very close.
+            # Otherwise, the immediate next node in the path is our current_target_node.
             if len(calculated_path) > 1:
-                current_target_node = calculated_path[current_path_idx + 1] # Set the immediate next node as target
+                current_target_node = calculated_path[current_path_idx + 1] 
             else:
-                current_target_node = calculated_path[current_path_idx] # If path is just the pickup node
+                current_target_node = calculated_path[current_path_idx] # Should be P1 itself
         else:
             print("ERROR: No path to initial pickup node. Stopping.")
             stop_motors()
@@ -570,19 +573,11 @@ def run_line_follower():
 
     try:
         while True:
-            # Check if all missions are complete
-            if current_mission_state == MISSION_STATE_COMPLETE:
-                print("\n*** ALL MISSIONS COMPLETE! Robot is idle. ***")
-                stop_motors()
-                # Optional: return to a specific "home" node here, or just stop.
-                while True:
-                    sleep(1) # Keep robot stopped
-            
-            # MPU6050 - Always update yaw angle in the main loop
+            # MPU6050 - Always update yaw angle and last_time in the main loop iteration for all movements
             gyro = mpu.get_gyro()
             current_time = ticks_ms()
             dt = (current_time - last_time) / 1000.0 # Time in seconds
-            last_time = current_time
+            last_time = current_time # Update global last_time
             
             # Integrate gyro Z (degrees/s) into yaw_angle (radians)
             yaw_angle += (gyro['z'] * (pi / 180.0)) * dt
@@ -631,6 +626,7 @@ def run_line_follower():
                     perform_180_turn()
                     
                     # Recalculate path from the last successfully reached node to the goal.
+                    # This needs to be the node we were *approaching* or *at* when the obstacle was detected.
                     current_robot_node = calculated_path[current_path_idx] if current_path_idx < len(calculated_path) else calculated_path[-1]
                     
                     # Recalculate the path to the current mission target
@@ -675,13 +671,16 @@ def run_line_follower():
                 
                 # --- Button Pressed Logic for Pickup ---
                 # This applies when the robot is going to a pickup node AND the button is pressed.
-                # The node detection should confirm we are at the pickup node.
+                # The P nodes are dead ends, so the bot should drive against the box, activate the switch,
+                # pick up, turn, and then re-plan.
                 if button_pressed and current_mission_state == MISSION_STATE_PICKUP:
-                    # Check if we are at the designated pickup node (current_target_node or last node in path)
-                    # This is a simplification; a more robust check would involve confirming our location.
-                    print(f"Button pressed at a potential pickup point! Current target node: {current_target_node}")
-                    # If the current target node is indeed the pickup node
-                    if current_target_node == current_pickup_node:
+                    # We assume if the button is pressed while in PICKUP state, and we are on a P-node path,
+                    # we have reached the box.
+                    print(f"Button pressed at a pickup point! Current mission pickup node: {current_pickup_node}")
+                    # If the button is pressed while we are trying to reach the current_pickup_node
+                    # (which will be the final node in the current path segment for pickup).
+                    # This checks if the *last* node we were heading towards in the current path was the pickup node.
+                    if calculated_path and calculated_path[-1] == current_pickup_node:
                         print(f"Confirmed at pickup node {current_pickup_node}. Activating electromagnet, picking up box.")
                         electromagnet.on()  # Turn electromagnet ON
                         stop_motors()       # Stop the robot
@@ -691,25 +690,104 @@ def run_line_follower():
                         current_mission_state = MISSION_STATE_DELIVER
                         print(f"Box picked up. Now moving to deliver to {current_delivery_node}.")
                         
-                        # Perform 180-degree turn
-                        perform_180_turn()
+                        # Drive backward, line following, until a node is detected
+                        print("Driving backward, line following to detect connecting node from P-node...")
+                        start_reverse_time = ticks_ms()
+                        reversed_to_node = False
+                        
+                        while ticks_diff(ticks_ms(), start_reverse_time) < 3000: # Max 3 seconds reverse
+                            ir_values_reverse = [pin.value() for pin in ir_pins]
+                            num_active_sensors_reverse = sum(1 for val in ir_values_reverse if val == 0)
 
-                        # Recalculate path from current node (which is current_pickup_node) to delivery node
-                        calculated_path = find_path_dijkstra(current_pickup_node, current_delivery_node, corrected_weighted_grid)
-                        if calculated_path:
-                            current_path_idx = 0
-                            if len(calculated_path) > 1:
-                                current_target_node = calculated_path[current_path_idx + 1]
+                            # Update yaw angle during backward movement as well
+                            gyro_reverse = mpu.get_gyro()
+                            current_time_loop_rev = ticks_ms()
+                            dt_loop_rev = (current_time_loop_rev - last_time) / 1000.0
+                            last_time = current_time_loop_rev # Update global last_time
+                            yaw_angle += (gyro_reverse['z'] * (pi / 180.0)) * dt_loop_rev
+                            yaw_angle = normalize_angle_rad(yaw_angle)
+
+                            if num_active_sensors_reverse > 0: # Line detected, apply line following
+                                weighted_sum_reverse = sum(weights[i] for i, val in enumerate(ir_values_reverse) if val == 0)
+                                error_reverse = weighted_sum_reverse / num_active_sensors_reverse
+                                
+                                # Invert the error for backward movement to ensure correct steering
+                                correction_reverse = int(error_reverse * KP)
+
+                                left_speed_rev = -REVERSE_SPEED + correction_reverse
+                                right_speed_rev = -REVERSE_SPEED - correction_reverse
+
+                                # Ensure speeds are within valid range (0-1023 magnitude)
+                                left_speed_rev = max(-1023, min(left_speed_rev, 0))
+                                right_speed_rev = max(-1023, min(right_speed_rev, 0))
+
+                                set_motor_speed(motor1_pwm, motor1_in2_pin, left_speed_rev)
+                                set_motor_speed(motor2_pwm, motor2_in2_pin, right_speed_rev)
+                            else: # Line lost while reversing, attempt to find by just backing up straight
+                                set_motor_speed(motor1_pwm, motor1_in2_pin, -REVERSE_SPEED)
+                                set_motor_speed(motor2_pwm, motor2_in2_pin, -REVERSE_SPEED)
+                            
+                            if is_node_detected_robust(ir_values_reverse, num_active_sensors_reverse):
+                                print("Backed up onto a node. Stopping reverse line following.")
+                                reversed_to_node = True
+                                break
+                            sleep_ms(5) # Smaller sleep for more responsive backward line following
+                        stop_motors()
+                        if not reversed_to_node:
+                            print("Warning: Did not detect a node while reversing from pickup. Might be off track.")
+                        
+                        # Drive forward for a short duration to compensate for sensor placement
+                        print("Driving forward for 1.5 seconds to center on intersection...")
+                        set_motor_speed(motor1_pwm, motor1_in2_pin, BASE_SPEED)
+                        set_motor_speed(motor2_pwm, motor2_in2_pin, BASE_SPEED)
+                        sleep(1.5) # Adjusted duration to 1.5 seconds
+                        stop_motors()
+                        print("Centered on intersection.")
+
+
+                        # The robot is now logically at the node from which it entered the P-node dead-end.
+                        # For P1, it's A1; for P2, it's A2, etc.
+                        # Get the "entry" node to the P-node from the grid
+                        entry_node_to_pickup = None
+                        for direction, info in corrected_weighted_grid[current_pickup_node].items():
+                            if info and info[0] in corrected_weighted_grid: # Check if the connected node exists in the main grid
+                                entry_node_to_pickup = info[0]
+                                break
+                        
+                        if entry_node_to_pickup:
+                            # Recalculate path from this entry node to the delivery node
+                            calculated_path = find_path_dijkstra(entry_node_to_pickup, current_delivery_node, corrected_weighted_grid)
+                            if calculated_path:
+                                current_path_idx = 0
+                                # The robot is currently facing the opposite direction (South if it was North).
+                                # The path from A1 to C1 (or A2, etc.) will assume it starts at A1 facing the correct direction.
+                                # So, we need to orient the robot after backing up and before starting the new path.
+                                if len(calculated_path) > 1:
+                                    current_node_name = calculated_path[current_path_idx] # This is the entry_node_to_pickup
+                                    next_node_name = calculated_path[current_path_idx + 1]
+                                    direction_to_next = get_direction_between_nodes(current_node_name, next_node_name, corrected_weighted_grid)
+                                    if direction_to_next and direction_to_next in TARGET_YAW_ANGLES:
+                                        target_yaw = TARGET_YAW_ANGLES[direction_to_next]
+                                        print(f"Orienting from {current_node_name} towards {next_node_name} ({direction_to_next}). Target Yaw: {target_yaw * 180/pi:.2f} deg")
+                                        orient_robot(target_yaw) # This will turn it from its current reversed orientation to the correct one
+                                    current_target_node = next_node_name
+                                else:
+                                    current_target_node = calculated_path[current_path_idx] # If path is just the delivery node itself
+                                    print(f"Path to {current_delivery_node} is just one node. No immediate turn needed.")
+
+                                print(f"Path to delivery {current_delivery_node}: {calculated_path}")
+
                             else:
-                                current_target_node = calculated_path[current_path_idx] # If path is just the delivery node itself
-                            print(f"Path to delivery {current_delivery_node}: {calculated_path}")
+                                print(f"ERROR: No path found from {entry_node_to_pickup} to {current_delivery_node}. Stopping.")
+                                stop_motors()
+                                return # Critical error, cannot complete mission
                         else:
-                            print(f"ERROR: No path found from {current_pickup_node} to {current_delivery_node}. Stopping.")
+                            print(f"ERROR: Could not determine entry node for {current_pickup_node}. Stopping.")
                             stop_motors()
-                            return # Critical error, cannot complete mission
-                    else:
-                        print("Button pressed but not at current pickup node. Ignoring for now.")
+                            return
 
+                    else:
+                        print(f"Button pressed, but not at the designated pickup node ({current_pickup_node}). Ignoring.")
 
                 ir_values = [pin.value() for pin in ir_pins] # Read all IR sensor values
                 error = 0
@@ -777,6 +855,57 @@ def run_line_follower():
                                     electromagnet.off() # Turn electromagnet OFF
                                     sleep(2) # Give some time for box to settle
                                     
+                                    # Drive backward, line following, until a node is detected
+                                    print("Driving backward, line following to detect connecting node from P-node (delivery)...")
+                                    start_reverse_time_delivery = ticks_ms()
+                                    reversed_to_node_delivery = False
+                                    while ticks_diff(ticks_ms(), start_reverse_time_delivery) < 3000: # Max 3 seconds reverse
+                                        ir_values_reverse_delivery = [pin.value() for pin in ir_pins]
+                                        num_active_sensors_reverse_delivery = sum(1 for val in ir_values_reverse_delivery if val == 0)
+
+                                        # Update yaw angle during backward movement as well
+                                        gyro_reverse_delivery = mpu.get_gyro()
+                                        current_time_loop_rev_del = ticks_ms()
+                                        dt_loop_rev_del = (current_time_loop_rev_del - last_time) / 1000.0
+                                        last_time = current_time_loop_rev_del # Update global last_time
+                                        yaw_angle += (gyro_reverse_delivery['z'] * (pi / 180.0)) * dt_loop_rev_del
+                                        yaw_angle = normalize_angle_rad(yaw_angle)
+
+                                        if num_active_sensors_reverse_delivery > 0:
+                                            weighted_sum_reverse_delivery = sum(weights[i] for i, val in enumerate(ir_values_reverse_delivery) if val == 0)
+                                            error_reverse_delivery = weighted_sum_reverse_delivery / num_active_sensors_reverse_delivery
+                                            
+                                            correction_reverse_delivery = int(error_reverse_delivery * KP)
+
+                                            left_speed_rev_del = -REVERSE_SPEED + correction_reverse_delivery
+                                            right_speed_rev_del = -REVERSE_SPEED - correction_reverse_delivery
+
+                                            left_speed_rev_del = max(-1023, min(left_speed_rev_del, 0))
+                                            right_speed_rev_del = max(-1023, min(right_speed_rev_del, 0))
+
+                                            set_motor_speed(motor1_pwm, motor1_in2_pin, left_speed_rev_del)
+                                            set_motor_speed(motor2_pwm, motor2_in2_pin, right_speed_rev_del)
+                                        else:
+                                            set_motor_speed(motor1_pwm, motor1_in2_pin, -REVERSE_SPEED)
+                                            set_motor_speed(motor2_pwm, motor2_in2_pin, -REVERSE_SPEED)
+
+                                        if is_node_detected_robust(ir_values_reverse_delivery, num_active_sensors_reverse_delivery):
+                                            print("Backed up onto a node from delivery. Stopping reverse line following.")
+                                            reversed_to_node_delivery = True
+                                            break
+                                        sleep_ms(5) # Smaller sleep for more responsive backward line following
+                                    stop_motors()
+                                    if not reversed_to_node_delivery:
+                                        print("Warning: Did not detect a node while reversing from delivery. Might be off track.")
+                                    
+                                    # Drive forward for a short duration to compensate for sensor placement
+                                    print("Driving forward for 1.5 seconds to center on intersection (delivery)...")
+                                    set_motor_speed(motor1_pwm, motor1_in2_pin, BASE_SPEED)
+                                    set_motor_speed(motor2_pwm, motor2_in2_pin, BASE_SPEED)
+                                    sleep(1.5) # Adjusted duration to 1.5 second
+                                    stop_motors()
+                                    print("Centered on intersection (delivery).")
+
                                     # Move to next mission or complete
                                     current_mission_idx += 1
                                     if current_mission_idx < len(MISSION_PLAN):
@@ -784,22 +913,39 @@ def run_line_follower():
                                         current_mission_state = MISSION_STATE_PICKUP # Go to next pickup
                                         print(f"Delivery complete. Next mission: Pick up from {current_pickup_node}.")
                                         
-                                        # Perform 180-degree turn
-                                        perform_180_turn()
+                                        # Recalculate path to the next pickup node from the node we just reversed from
+                                        # (e.g., if we delivered to P5, we are now at E3 after reversing).
+                                        entry_node_from_delivery = None
+                                        for direction, info in corrected_weighted_grid[target_goal_for_mission_stage].items():
+                                            if info and info[0] in corrected_weighted_grid:
+                                                entry_node_from_delivery = info[0]
+                                                break
 
-                                        # Recalculate path to the next pickup node
-                                        # Assuming robot is currently at the *previous* delivery node
-                                        calculated_path = find_path_dijkstra(target_goal_for_mission_stage, current_pickup_node, corrected_weighted_grid)
-                                        if calculated_path:
-                                            current_path_idx = 0
-                                            if len(calculated_path) > 1:
-                                                current_target_node = calculated_path[current_path_idx + 1]
+                                        if entry_node_from_delivery:
+                                            calculated_path = find_path_dijkstra(entry_node_from_delivery, current_pickup_node, corrected_weighted_grid)
+                                            if calculated_path:
+                                                current_path_idx = 0
+                                                # Reorient to the first segment of the new path if there's one
+                                                if len(calculated_path) > 1:
+                                                    current_node_name = calculated_path[current_path_idx]
+                                                    next_node_name = calculated_path[current_path_idx + 1]
+                                                    direction_to_next = get_direction_between_nodes(current_node_name, next_node_name, corrected_weighted_grid)
+                                                    if direction_to_next and direction_to_next in TARGET_YAW_ANGLES:
+                                                        target_yaw = TARGET_YAW_ANGLES[direction_to_next]
+                                                        print(f"Orienting from {current_node_name} towards {next_node_name} ({direction_to_next}). Target Yaw: {target_yaw * 180/pi:.2f} deg")
+                                                        orient_robot(target_yaw) # This will turn it from its current reversed orientation to the correct one
+                                                    current_target_node = calculated_path[current_path_idx + 1]
+                                                else:
+                                                    current_target_node = calculated_path[current_path_idx]
+                                                print(f"Path to next pickup {current_pickup_node}: {calculated_path}")
                                             else:
-                                                current_target_node = calculated_path[current_path_idx]
-                                            print(f"Path to next pickup {current_pickup_node}: {calculated_path}")
+                                                print(f"ERROR: No path found from {entry_node_from_delivery} to {current_pickup_node}. Stopping.")
+                                                current_mission_state = MISSION_STATE_COMPLETE # Cannot continue
+                                                stop_motors()
+                                                return
                                         else:
-                                            print(f"ERROR: No path found from {target_goal_for_mission_stage} to {current_pickup_node}. Stopping.")
-                                            current_mission_state = MISSION_STATE_COMPLETE # Cannot continue
+                                            print(f"ERROR: Could not determine entry node for {target_goal_for_mission_stage}. Stopping.")
+                                            current_mission_state = MISSION_STATE_COMPLETE
                                             stop_motors()
                                             return
 
@@ -841,7 +987,7 @@ def run_line_follower():
                         # or the robot will stay stopped if at the goal.
 
                 # Continue with line following if not at goal, not handling obstacle, and not waiting for button
-                if not button_pressed and not (current_mission_state == MISSION_STATE_PICKUP and current_target_node == current_pickup_node):
+                if not button_pressed or not (current_mission_state == MISSION_STATE_PICKUP and current_target_node == current_pickup_node):
                     if num_active_sensors > 0:
                         error = weighted_sum / num_active_sensors
                     else: # If line is lost, try to continue moving forward
@@ -849,6 +995,8 @@ def run_line_follower():
                         set_motor_speed(motor1_pwm, motor1_in2_pin, BASE_SPEED)
                         set_motor_speed(motor2_pwm, motor2_in2_pin, BASE_SPEED)
                         sleep_ms(100) # Small delay to allow the robot to move forward a bit
+                        # The gyro and sensor readings will be updated in the next loop iteration
+                        # due to the 'continue' and the main loop structure.
                         continue # Skip the rest of the loop and try to find the line again in the next iteration
 
                     correction = int(error * KP)
@@ -891,7 +1039,9 @@ def run_line_follower():
             if calculated_path:
                 print("Current Path:", calculated_path)
             
-            sleep_ms(20) # Small delay to stabilize readings and prevent busy-waiting
+            sleep_ms(5) # Reduced sleep for more responsive main loop
+            # This sleep is global for the main loop, so it affects sensor reading frequency
+            # and motor updates for both forward line following and obstacle checking.
 
     except KeyboardInterrupt:
         print("Program interrupted by user.")
@@ -907,5 +1057,10 @@ stop_motors()
 mpu = MPU6050(i2c)
 mpu.calibrate_gyro()
 
+# Set the initial yaw angle to North (pi/2 radians)
+# This assumes the robot is always placed at A1 facing P1 (North).
+yaw_angle = pi / 2
+
 # Start the line following loop (robot will start moving after path is calculated and printed)
 run_line_follower()
+
