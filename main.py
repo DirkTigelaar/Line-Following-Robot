@@ -2,6 +2,7 @@
 # LINE FOLLOWING
 # PATH FOLLOWING
 # OBSTACLE AVOIDANCE
+# BOX PICKUP AND DELIVERY
 # ©GROUP 3
 
 from machine import Pin, I2C, PWM
@@ -152,7 +153,7 @@ i2c = I2C(0, scl=Pin(22), sda=Pin(21))
 trig = Pin(19, Pin.OUT)
 echo = Pin(23, Pin.IN)
 
-# Button
+# Button (Switch)
 button = Pin(18, Pin.IN, Pin.PULL_UP)
 
 # Electromagnet
@@ -216,7 +217,7 @@ MAX_CORRECTION = 200
 # Threshold for number of active sensors to consider it a node
 NODE_SENSOR_THRESHOLD = 3 
 # Time to stop at a node (in ms)
-NODE_STOP_TIME_MS = 750 # Increased from 500ms
+NODE_STOP_TIME_MS = 750
 # Cooldown period for node detection (in ms)
 NODE_DETECTION_COOLDOWN_MS = 2000 # 2 seconds
 
@@ -306,8 +307,6 @@ def find_path_dijkstra(start_node, goal_node, grid_map_weighted, blocked_nodes=N
         for direction, neighbor_info in grid_map_weighted[current_node_pq].items():
             if neighbor_info: # Check if there's a valid connection
                 neighbor, weight = neighbor_info
-                # The 'blocked_nodes' parameter is kept for general use,
-                # but for this specific obstacle avoidance, we rely on high edge weights.
                 if neighbor not in blocked_nodes:
                     distance = current_distance + weight
                     # If a shorter path to the neighbor is found
@@ -433,9 +432,25 @@ def is_node_detected_robust(ir_values, num_active_sensors):
 
     return False
 
-# --- Hardcoded Start and Goal Nodes ---
-START_NODE = "C3"
-GOAL_NODE = "C1"
+# --- Mission Control Parameters ---
+# Define the pickup and delivery sequence
+# Each tuple: (pickup_node, delivery_node)
+MISSION_PLAN = [
+    ("P1", "P5"),
+    ("P2", "P6"),
+    ("P3", "P7"),
+    ("P4", "P8"),
+]
+
+# Global state variables for the mission
+MISSION_STATE_PICKUP = 0
+MISSION_STATE_DELIVER = 1
+MISSION_STATE_COMPLETE = 2
+
+current_mission_idx = 0
+current_mission_state = MISSION_STATE_PICKUP # Start by picking up the first box
+current_pickup_node = ""
+current_delivery_node = ""
 
 # Global variables for yaw calculation and node detection cooldown
 yaw_angle = 0.0 # Yaw angle in radians
@@ -446,6 +461,7 @@ obstacle_detected_flag = False # New global flag for obstacle detection
 # Global variables to manage path
 calculated_path = [] # Will be populated initially and recalculated
 current_path_idx = 0
+current_target_node = "" # The node the robot is currently heading towards in its path
 
 # Cardinal directions and their target yaw angles (in radians)
 # Assumes 'E' (East) is 0 radians, 'N' (North) is pi/2, 'S' (South) is -pi/2, 'W' (West) is pi.
@@ -487,11 +503,11 @@ def orient_robot(target_yaw_radians, spin_in_place=True):
         if angle_diff > 0: # Need to turn counter-clockwise (Left)
             set_motor_speed(motor1_pwm, motor1_in2_pin, -TURN_SPEED) # Left wheel backward
             set_motor_speed(motor2_pwm, motor2_in2_pin, TURN_SPEED)  # Right wheel forward
-            turn_direction_str = "LEFT (CCW) - Spin"
+            # turn_direction_str = "LEFT (CCW) - Spin"
         else: # Need to turn clockwise (Right)
             set_motor_speed(motor1_pwm, motor1_in2_pin, TURN_SPEED)  # Left wheel forward
             set_motor_speed(motor2_pwm, motor2_in2_pin, -TURN_SPEED) # Right wheel backward
-            turn_direction_str = "RIGHT (CW) - Spin"
+            # turn_direction_str = "RIGHT (CW) - Spin"
 
         # Update yaw angle
         gyro = mpu.get_gyro()
@@ -513,16 +529,55 @@ def orient_robot(target_yaw_radians, spin_in_place=True):
         print("Warning: Orientation reached max turn attempts. Might not be perfectly aligned.")
 
 
+def perform_180_turn():
+    """Performs a 180-degree turn in place."""
+    global yaw_angle
+    print("Performing 180-degree turn...")
+    target_yaw_180 = normalize_angle_rad(yaw_angle + pi)
+    orient_robot(target_yaw_180, spin_in_place=True)
+    print("180-degree turn complete.")
+
 # ----- Line Following Control Loop -----
 def run_line_follower():
-    """Main loop for line following and node detection and path navigation."""
+    """Main loop for line following and node detection and path navigation, now incorporating mission logic."""
     global yaw_angle, last_time, current_path_idx, last_node_detection_time, obstacle_detected_flag, \
-           calculated_path # Declare global to modify
+           calculated_path, current_mission_idx, current_mission_state, \
+           current_pickup_node, current_delivery_node, current_target_node # Declare global to modify
 
-    print(f"\nCalculated path from {START_NODE} to {GOAL_NODE}: {calculated_path}")
+    # Initialize the first mission target
+    if MISSION_PLAN:
+        current_pickup_node, current_delivery_node = MISSION_PLAN[current_mission_idx]
+        print(f"\nStarting mission: Pick up from {current_pickup_node}")
+        # Initial path calculation for pickup
+        calculated_path = find_path_dijkstra("C3", current_pickup_node, corrected_weighted_grid) # Assuming C3 as starting point
+        print(f"Initial path to pickup {current_pickup_node}: {calculated_path}")
+        if calculated_path:
+            current_path_idx = 0
+            if len(calculated_path) > 1:
+                current_target_node = calculated_path[current_path_idx + 1] # Set the immediate next node as target
+            else:
+                current_target_node = calculated_path[current_path_idx] # If path is just the pickup node
+        else:
+            print("ERROR: No path to initial pickup node. Stopping.")
+            stop_motors()
+            return
+
+    else:
+        print("No mission plan defined. Exiting.")
+        stop_motors()
+        return
+
 
     try:
         while True:
+            # Check if all missions are complete
+            if current_mission_state == MISSION_STATE_COMPLETE:
+                print("\n*** ALL MISSIONS COMPLETE! Robot is idle. ***")
+                stop_motors()
+                # Optional: return to a specific "home" node here, or just stop.
+                while True:
+                    sleep(1) # Keep robot stopped
+            
             # MPU6050 - Always update yaw angle in the main loop
             gyro = mpu.get_gyro()
             current_time = ticks_ms()
@@ -545,34 +600,26 @@ def run_line_follower():
                     stop_motors() # Ensure motors are stopped before turning
                     print("\n!!! OBSTACLE DETECTED! Performing 180-degree spin in place and recalculating path. !!!")
 
-                    # Determine the segment that is blocked by the obstacle based on the current_path_idx
-                    # current_path_idx here indicates the target node the robot is currently moving towards.
-                    blocked_segment_start_node = None
-                    blocked_segment_end_node = None
-
-                    # If current_path_idx is 0, the robot is trying to move from START_NODE to calculated_path[0].
-                    # The obstacle is on this very first segment.
-                    if current_path_idx == 0:
-                        blocked_segment_start_node = START_NODE
-                        if len(calculated_path) > 0: # Ensure there's a target node
-                            blocked_segment_end_node = calculated_path[0]
-                    else:
-                        # If current_path_idx > 0, it means the robot has successfully passed
-                        # calculated_path[current_path_idx - 1] and is now trying to move
-                        # towards calculated_path[current_path_idx].
-                        # The obstacle is detected on the segment from calculated_path[current_path_idx - 1]
-                        # to calculated_path[current_path_idx].
-                        if current_path_idx < len(calculated_path): # Ensure current_path_idx is a valid target node
+                    # Determine the segment that is blocked by the obstacle
+                    if current_path_idx < len(calculated_path):
+                        # The robot is currently trying to reach calculated_path[current_path_idx].
+                        # The segment before it is the one just traversed or the current start.
+                        if current_path_idx == 0:
+                            blocked_segment_start_node = calculated_path[0] # Assuming this is the 'from' node for the first segment
+                            if len(calculated_path) > 1:
+                                blocked_segment_end_node = calculated_path[1]
+                            else: # If path is just one node (start and goal are the same or only goal is left)
+                                print("Warning: Path is too short to determine a blocked segment.")
+                                blocked_segment_start_node = None
+                                blocked_segment_end_node = None
+                        else:
                             blocked_segment_start_node = calculated_path[current_path_idx - 1]
                             blocked_segment_end_node = calculated_path[current_path_idx]
-                        else:
-                            # This scenario means current_path_idx is beyond the end of the calculated_path,
-                            # implying the robot is at or past the goal, or path is invalid.
-                            print("Warning: Obstacle detected but robot is at or beyond goal node's index. Cannot block a specific segment.")
-                            stop_motors()
-                            sleep(5)
-                            return # Exit to avoid errors or endless loop
-
+                    else: # Robot is at or past the goal
+                        print("Warning: Obstacle detected but robot is at or beyond goal node's index. Cannot block a specific segment.")
+                        stop_motors()
+                        sleep(5)
+                        return # Exit to avoid errors or endless loop
 
                     if blocked_segment_start_node and blocked_segment_end_node:
                         # Increase the weight of the path segment to effectively block it
@@ -580,18 +627,19 @@ def run_line_follower():
                              print(f"Warning: Could not find or block segment from {blocked_segment_start_node} to {blocked_segment_end_node}.")
                     else:
                         print("Warning: Could not determine valid segment to block due to path length or index issues. Proceeding with recalculation anyway.")
-                        # Even if no specific segment is blocked, we still try to recalculate the path.
                         
-                    # Perform the 180-degree turn
-                    target_yaw_180 = normalize_angle_rad(yaw_angle + pi)
-                    orient_robot(target_yaw_180, spin_in_place=True) 
+                    perform_180_turn()
                     
                     # Recalculate path from the last successfully reached node to the goal.
-                    # This corresponds to blocked_segment_start_node.
-                    current_robot_node = blocked_segment_start_node 
+                    current_robot_node = calculated_path[current_path_idx] if current_path_idx < len(calculated_path) else calculated_path[-1]
                     
-                    # Recalculate the path. The find_path_dijkstra now uses the grid with increased weights.
-                    new_calculated_path = find_path_dijkstra(current_robot_node, GOAL_NODE, corrected_weighted_grid)
+                    # Recalculate the path to the current mission target
+                    if current_mission_state == MISSION_STATE_PICKUP:
+                        target_goal_node = current_pickup_node
+                    else: # MISSION_STATE_DELIVER
+                        target_goal_node = current_delivery_node
+
+                    new_calculated_path = find_path_dijkstra(current_robot_node, target_goal_node, corrected_weighted_grid)
                     
                     if not new_calculated_path:
                         print("CRITICAL ERROR: No alternative path found after obstacle. Stopping.")
@@ -603,40 +651,65 @@ def run_line_follower():
                         # Reset path index based on the new current_robot_node
                         try:
                             current_path_idx = calculated_path.index(current_robot_node)
+                            # If we just turned 180 degrees, we are effectively at the "start" of the segment
+                            # that was just blocked, so we need to target the next node in the new path.
+                            if current_path_idx < len(calculated_path) - 1:
+                                current_target_node = calculated_path[current_path_idx + 1]
+                            else: # If new path is just the current node (goal is current node)
+                                current_target_node = calculated_path[current_path_idx]
                         except ValueError:
-                            # This should ideally not happen if current_robot_node is in the new path
-                            print("Warning: Last reached node not found in new path. Resetting index to 0.")
-                            current_path_idx = 0 
-                        
-                        # --- REMOVED: Immediate re-orientation after recalculation. Robot will now line-follow. ---
-                        # The robot will now naturally proceed to line-follow on the new path.
-                        # The re-orientation for the next segment will happen when it detects the next node.
+                            print("Warning: Last known node not found in new path. Resetting index to 0.")
+                            current_path_idx = 0
+                            current_target_node = calculated_path[0] if calculated_path else ""
                         
                         obstacle_detected_flag = False # Reset flag to allow normal operation
             
             # Handle obstacle clearance *after* any potential re-calculation and re-orientation
             if not is_obstacle_currently_present and obstacle_detected_flag:
-                # This block will likely be hit if the obstacle was only momentarily detected
-                # or if the turn effectively moved the robot away from the obstacle's direct line of sight.
                 print("--- Obstacle cleared. Resuming. ---")
                 obstacle_detected_flag = False
             
             # This main block only executes if no obstacle is currently preventing movement
             if not obstacle_detected_flag:
-                # Button state
                 button_pressed = button.value() == 0
                 
-                # --- NEW: Button pressed logic for electromagnet and robot stop ---
-                if button_pressed:
-                    print("Button pressed! Activating electromagnet and stopping robot for 3 seconds.")
-                    electromagnet.on()  # Turn electromagnet ON
-                    stop_motors()       # Stop the robot
-                    sleep(3)            # Wait for 3 seconds
-                    electromagnet.off() # Turn electromagnet OFF after stopping
-                    print("Resuming robot movement.")
-                    # After the delay, the loop will continue, and the robot will resume line following
-                    # based on the current state.
-                # --- END NEW ---
+                # --- Button Pressed Logic for Pickup ---
+                # This applies when the robot is going to a pickup node AND the button is pressed.
+                # The node detection should confirm we are at the pickup node.
+                if button_pressed and current_mission_state == MISSION_STATE_PICKUP:
+                    # Check if we are at the designated pickup node (current_target_node or last node in path)
+                    # This is a simplification; a more robust check would involve confirming our location.
+                    print(f"Button pressed at a potential pickup point! Current target node: {current_target_node}")
+                    # If the current target node is indeed the pickup node
+                    if current_target_node == current_pickup_node:
+                        print(f"Confirmed at pickup node {current_pickup_node}. Activating electromagnet, picking up box.")
+                        electromagnet.on()  # Turn electromagnet ON
+                        stop_motors()       # Stop the robot
+                        sleep(3)            # Wait for 3 seconds to ensure pickup
+                        
+                        # After pickup, transition to deliver state
+                        current_mission_state = MISSION_STATE_DELIVER
+                        print(f"Box picked up. Now moving to deliver to {current_delivery_node}.")
+                        
+                        # Perform 180-degree turn
+                        perform_180_turn()
+
+                        # Recalculate path from current node (which is current_pickup_node) to delivery node
+                        calculated_path = find_path_dijkstra(current_pickup_node, current_delivery_node, corrected_weighted_grid)
+                        if calculated_path:
+                            current_path_idx = 0
+                            if len(calculated_path) > 1:
+                                current_target_node = calculated_path[current_path_idx + 1]
+                            else:
+                                current_target_node = calculated_path[current_path_idx] # If path is just the delivery node itself
+                            print(f"Path to delivery {current_delivery_node}: {calculated_path}")
+                        else:
+                            print(f"ERROR: No path found from {current_pickup_node} to {current_delivery_node}. Stopping.")
+                            stop_motors()
+                            return # Critical error, cannot complete mission
+                    else:
+                        print("Button pressed but not at current pickup node. Ignoring for now.")
+
 
                 ir_values = [pin.value() for pin in ir_pins] # Read all IR sensor values
                 error = 0
@@ -652,61 +725,127 @@ def run_line_follower():
                         num_active_sensors += 1
 
                 # --- Node Detection Logic with Cooldown ---
-                # Now using the more robust detection function
                 if is_node_detected_robust(ir_values, num_active_sensors):
-                    # Check if enough time has passed since the last node detection
                     if (current_time - last_node_detection_time) >= NODE_DETECTION_COOLDOWN_MS:
                         stop_motors()
                         print("\n*** NODE DETECTED! Stopping briefly. ***")
                         sleep_ms(NODE_STOP_TIME_MS) # Uses the updated NODE_STOP_TIME_MS
                         
-                        # --- MODIFICATION: Drive forward for 1 second to clear the node ---
+                        # Drive forward for 1 second to clear the node (important for small bots)
                         print("Driving forward for 1 second to clear node with wheels...")
                         set_motor_speed(motor1_pwm, motor1_in2_pin, BASE_SPEED)
                         set_motor_speed(motor2_pwm, motor2_in2_pin, BASE_SPEED)
                         sleep(1) # Drive forward for 1 second
                         stop_motors() # Stop after driving forward
-                        # --- END MODIFICATION ---
 
                         last_node_detection_time = current_time # Update last detection time
 
-                        # Check if we are still on the path
-                        if current_path_idx < len(calculated_path) - 1:
-                            current_node_name = calculated_path[current_path_idx]
-                            next_node_name = calculated_path[current_path_idx + 1]
-                            
-                            direction_to_next = get_direction_between_nodes(current_node_name, next_node_name, corrected_weighted_grid)
-                            
-                            if direction_to_next and direction_to_next in TARGET_YAW_ANGLES:
-                                target_yaw = TARGET_YAW_ANGLES[direction_to_next]
-                                print(f"Current node: {current_node_name}, Next node: {next_node_name}")
-                                print(f"Required turn direction: {direction_to_next}, Target Yaw: {target_yaw * 180/pi:.2f} deg")
-                                orient_robot(target_yaw) # Orient the robot
-                                current_path_idx += 1 # Advance to the next node in the path
-                            else:
-                                print(f"Warning: Could not determine direction from {current_node_name} to {next_node_name} or direction is not recognized.")
-                                current_path_idx += 1 # Still advance, to avoid getting stuck at this node
-                        elif current_path_idx == len(calculated_path) - 1:
-                            print("*** GOAL NODE REACHED! ***")
-                            stop_motors()
-                            # Optionally, add a behavior for reaching the goal, e.g., electromagnet action, sound.
-                            while True: # Keep robot stopped at goal
-                                sleep(1) # Sleep indefinitely or until reset
-                        else:
-                            # This case should ideally not be reached if logic is sound,
-                            # but it covers scenarios where a node is detected beyond the end of the path.
-                            print("Node detected, but path already completed or index out of bounds.")
-                            stop_motors() # Stop to prevent unexpected movement
+                        # Check if we have reached the current target node in the path
+                        # The robot is considered to have 'reached' a node if a node is detected,
+                        # and that detected node is the one immediately following the current_path_idx.
+                        # For simplicity, we assume robust detection and that the detected node IS current_target_node.
 
-                        # After node handling (orientation or goal reached), line following will resume naturally
+                        current_node_reached = False
+                        if current_path_idx < len(calculated_path):
+                            # The node we just passed/are at is calculated_path[current_path_idx]
+                            # and our target was calculated_path[current_path_idx]
+                            print(f"Node detection event: Robot at or just passed {calculated_path[current_path_idx]}")
+                            current_node_reached = True
+                        else:
+                            # This means we are at the very end of the path or beyond
+                            print("Node detected, but path index is at or beyond end of path.")
+                            # Still proceed to handle the 'goal' logic if applicable below
+
+                        if current_node_reached:
+                            current_path_idx += 1 # Advance to the next segment's start node (or goal)
+
+                            # Check if current_path_idx now points to the goal for the current mission stage
+                            target_goal_for_mission_stage = ""
+                            if current_mission_state == MISSION_STATE_PICKUP:
+                                target_goal_for_mission_stage = current_pickup_node
+                            elif current_mission_state == MISSION_STATE_DELIVER:
+                                target_goal_for_mission_stage = current_delivery_node
+                            
+                            # If we just arrived at the mission's immediate goal (pickup or delivery)
+                            if (current_path_idx > 0 and calculated_path[current_path_idx - 1] == target_goal_for_mission_stage):
+                                print(f"*** Arrived at mission stage goal: {target_goal_for_mission_stage} ***")
+                                stop_motors()
+                                
+                                if current_mission_state == MISSION_STATE_DELIVER:
+                                    # Logic for delivery completion
+                                    print(f"Arrived at delivery node {current_delivery_node}. Deactivating electromagnet.")
+                                    electromagnet.off() # Turn electromagnet OFF
+                                    sleep(2) # Give some time for box to settle
+                                    
+                                    # Move to next mission or complete
+                                    current_mission_idx += 1
+                                    if current_mission_idx < len(MISSION_PLAN):
+                                        current_pickup_node, current_delivery_node = MISSION_PLAN[current_mission_idx]
+                                        current_mission_state = MISSION_STATE_PICKUP # Go to next pickup
+                                        print(f"Delivery complete. Next mission: Pick up from {current_pickup_node}.")
+                                        
+                                        # Perform 180-degree turn
+                                        perform_180_turn()
+
+                                        # Recalculate path to the next pickup node
+                                        # Assuming robot is currently at the *previous* delivery node
+                                        calculated_path = find_path_dijkstra(target_goal_for_mission_stage, current_pickup_node, corrected_weighted_grid)
+                                        if calculated_path:
+                                            current_path_idx = 0
+                                            if len(calculated_path) > 1:
+                                                current_target_node = calculated_path[current_path_idx + 1]
+                                            else:
+                                                current_target_node = calculated_path[current_path_idx]
+                                            print(f"Path to next pickup {current_pickup_node}: {calculated_path}")
+                                        else:
+                                            print(f"ERROR: No path found from {target_goal_for_mission_stage} to {current_pickup_node}. Stopping.")
+                                            current_mission_state = MISSION_STATE_COMPLETE # Cannot continue
+                                            stop_motors()
+                                            return
+
+                                    else:
+                                        print("All boxes delivered! Mission complete.")
+                                        current_mission_state = MISSION_STATE_COMPLETE # All missions done
+                                        stop_motors()
+                                        return # Exit function, robot is done
+                                # The pickup logic is now triggered by the button, not by reaching the node alone
+                                # So, if we arrive at a pickup node (but didn't press button yet), we just continue line following.
+                                # The button handler will then manage the transition.
+
+                            # If not at the ultimate mission goal, orient to the next segment of the current path
+                            if current_path_idx < len(calculated_path): # Check if there's a next node in the path
+                                current_node_name = calculated_path[current_path_idx -1] # The node we just came from/are at
+                                next_node_name = calculated_path[current_path_idx] # The node we need to go to
+                                
+                                direction_to_next = get_direction_between_nodes(current_node_name, next_node_name, corrected_weighted_grid)
+                                
+                                if direction_to_next and direction_to_next in TARGET_YAW_ANGLES:
+                                    target_yaw = TARGET_YAW_ANGLES[direction_to_next]
+                                    print(f"Current node: {current_node_name}, Next path segment target: {next_node_name}")
+                                    print(f"Required turn direction: {direction_to_next}, Target Yaw: {target_yaw * 180/pi:.2f} deg")
+                                    orient_robot(target_yaw) # Orient the robot
+                                    current_target_node = next_node_name # Update the immediate target node
+                                else:
+                                    print(f"Warning: Could not determine direction from {current_node_name} to {next_node_name} or direction is not recognized. Attempting to continue.")
+                                    # If direction cannot be found, robot might get lost. Keep going straight?
+                                    # For now, just advance the index and hope for the best.
+                                    # It's crucial that all valid transitions are defined in TARGET_YAW_ANGLES.
+                            else:
+                                # This means we've processed all nodes in the current calculated_path,
+                                # and we are essentially at the end of this leg of the journey.
+                                # The mission state logic above should handle what happens next (delivery, new pickup, complete).
+                                print("End of current calculated path reached. Waiting for next mission step.")
+                                stop_motors() # Stop and wait for the mission logic to re-plan.
+                        
+                        # After node handling, line following will resume naturally
                         # or the robot will stay stopped if at the goal.
 
-                # Continue with line following if not at goal or if orientation is complete
-                if not button_pressed: # Only line-follow if the button is NOT pressed
+                # Continue with line following if not at goal, not handling obstacle, and not waiting for button
+                if not button_pressed and not (current_mission_state == MISSION_STATE_PICKUP and current_target_node == current_pickup_node):
                     if num_active_sensors > 0:
                         error = weighted_sum / num_active_sensors
-                    else: # If line is lost, continue moving forward
-                        print("Line lost! Continuing forwards.")
+                    else: # If line is lost, try to continue moving forward
+                        print("Line lost! Continuing forwards, attempting to find line.")
                         set_motor_speed(motor1_pwm, motor1_in2_pin, BASE_SPEED)
                         set_motor_speed(motor2_pwm, motor2_in2_pin, BASE_SPEED)
                         sleep_ms(100) # Small delay to allow the robot to move forward a bit
@@ -725,8 +864,7 @@ def run_line_follower():
                     set_motor_speed(motor2_pwm, motor2_in2_pin, right_speed)
 
             else:
-                # If obstacle_detected_flag is still True at this point, it means an obstacle is still present
-                # (e.g., if the turn didn't fully clear it, or if it reappeared immediately after turn)
+                # If obstacle_detected_flag is True, stop motors
                 stop_motors()
                 sleep_ms(50) # Small delay to prevent busy-waiting while waiting for obstacle to clear
 
@@ -736,20 +874,22 @@ def run_line_follower():
             print("IR Sensors:", ir_values)
             print("Error:", error)
             print("Correction:", correction)
-            print(f"Left Speed: {left_speed}, Right Speed: {right_speed}")
+            # Ensure left_speed and right_speed are defined before printing, in case line is lost initially
+            print(f"Left Speed: {locals().get('left_speed', 'N/A')}, Right Speed: {locals().get('right_speed', 'N/A')}")
             print("Encoder 1 Count:", position1)
             print("Encoder 2 Count:", position2)
             print("Distance: {:.2f} cm".format(dist) if dist != -1 else "Ultrasonic: Timeout")
             print("Button Pressed:", button_pressed)
             print("Yaw angle (deg): {:.2f}".format(yaw_angle * 180/pi))
             print("Obstacle Detected Flag:", obstacle_detected_flag)
+            print("Current Mission Index:", current_mission_idx)
+            print("Current Mission State:", "PICKUP" if current_mission_state == MISSION_STATE_PICKUP else "DELIVER" if current_mission_state == MISSION_STATE_DELIVER else "COMPLETE")
+            print("Current Pickup Node:", current_pickup_node)
+            print("Current Delivery Node:", current_delivery_node)
             print("Current Path Index:", current_path_idx)
+            print("Current Target Node (in path):", current_target_node)
             if calculated_path:
-                # The displayed "Current Logical Node" here refers to the target node of the segment being traversed
-                print("Current Logical Node:", calculated_path[current_path_idx] if current_path_idx < len(calculated_path) else "At Goal or Beyond")
-            # The 'blocked_path_segments' is no longer used for dynamic blocking in this version,
-            # as blocking is now done via increasing edge weights directly in corrected_weighted_grid.
-            # print("Blocked Path Segments (Nodes):", blocked_path_segments)
+                print("Current Path:", calculated_path)
             
             sleep_ms(20) # Small delay to stabilize readings and prevent busy-waiting
 
@@ -767,23 +907,5 @@ stop_motors()
 mpu = MPU6050(i2c)
 mpu.calibrate_gyro()
 
-# 3. Calculate the initial path using Dijkstra's
-calculated_path = find_path_dijkstra(START_NODE, GOAL_NODE, corrected_weighted_grid)
-print(f"Initial Path from {START_NODE} to {GOAL_NODE}: {calculated_path}")
-
-# 4. Set initial yaw angle based on the first segment of the path
-if len(calculated_path) > 1:
-    initial_direction = get_direction_between_nodes(calculated_path[0], calculated_path[1], corrected_weighted_grid)
-    if initial_direction and initial_direction in TARGET_YAW_ANGLES:
-        yaw_angle = TARGET_YAW_ANGLES[initial_direction]
-        print(f"Initial yaw set to {yaw_angle:.2f} rad ({yaw_angle * 180/pi:.2f} deg) based on direction '{initial_direction}' from {calculated_path[0]} to {calculated_path[1]}.")
-    else:
-        print("Warning: Could not set initial yaw based on path direction. Defaulting to 0 rad.")
-        yaw_angle = 0.0 # Default if direction cannot be determined
-else:
-    print("Path has only one node or is empty. Initial yaw set to 0 rad.")
-    yaw_angle = 0.0 # Default for single-node paths
-
 # Start the line following loop (robot will start moving after path is calculated and printed)
-run_line_follower() 
-
+run_line_follower()
