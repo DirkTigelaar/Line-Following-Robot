@@ -240,6 +240,9 @@ NODE_DETECTION_COOLDOWN_MS = 2000 # 2 seconds
 # ----- Obstacle Detection Parameters ---
 OBSTACLE_DISTANCE_CM = 10 # Distance threshold for obstacle detection in cm
 
+# Printing interval for debug information
+PRINT_INTERVAL_MS = 200 # Print debug info every 200 milliseconds
+
 # ----- Path Planning Grid (Corrected and Weighted) -----
 corrected_weighted_grid = {
     # Parking spots (P nodes)
@@ -499,6 +502,9 @@ integral_lf = 0
 last_error_turn = 0
 integral_turn = 0
 
+# Last time a debug print was made
+last_print_time = 0
+
 
 def orient_robot(target_yaw_radians, spin_in_place=True):
     """
@@ -586,7 +592,7 @@ def run_line_follower():
     global yaw_angle, current_path_idx, last_node_detection_time, obstacle_detected_flag, \
            calculated_path, current_mission_idx, current_mission_state, \
            current_pickup_node, current_delivery_node, current_target_node, \
-           last_error_lf, integral_lf # Declare global for PID
+           last_error_lf, integral_lf, last_print_time # Declare global for PID and printing timer
 
     # Define weights locally within the function to ensure scope
     weights = [-2, -1, 0, 1, 2] # Weights for error calculation. Assumes sensors are arranged Left-most to Right-most physically.
@@ -630,6 +636,7 @@ def run_line_follower():
 
     # Initialize local last_time for precise dt calculation within line follower loop
     last_loop_time = ticks_ms() # New local variable for dt calculation within this loop
+    last_print_time = ticks_ms() # Initialize print timer
 
     try:
         while True:
@@ -1154,28 +1161,30 @@ def run_line_follower():
                 sleep_ms(50) # Small delay to prevent busy-waiting while waiting for obstacle to clear
 
 
-            # Print current robot state for debugging
-            print("\n--- Current Robot State ---")
-            print("IR Sensors:", ir_values)
-            print("Error:", error)
-            print("Correction:", correction)
-            # Now `left_speed` and `right_speed` will always be defined
-            print(f"Left Speed: {left_speed}, Right Speed: {right_speed}")
-            print("Encoder 1 Count:", position1)
-            print("Encoder 2 Count:", position2)
-            print("Distance: {:.2f} cm".format(dist) if dist != -1 else "Ultrasonic: Timeout")
-            print("Button Pressed:", button_pressed)
-            print("Yaw angle (deg): {:.2f}".format(yaw_angle * 180/pi))
-            print("Obstacle Detected Flag:", obstacle_detected_flag)
-            print("Current Mission Index:", current_mission_idx)
-            print("Current Mission State:", "PICKUP" if current_mission_state == MISSION_STATE_PICKUP else "DELIVER" if current_mission_state == MISSION_STATE_DELIVER else "COMPLETE")
-            print("Current Pickup Node:", current_pickup_node)
-            print("Current Delivery Node:", current_delivery_node)
-            print("Current Node Index in Path:", current_path_idx) # Changed label
-            print("Next Node to Target in Path:", current_target_node) # Changed label
-            if calculated_path:
-                print("Current Path:", calculated_path)
-            
+            # --- Conditional Debug Printing ---
+            current_time_for_print = ticks_ms()
+            if (current_time_for_print - last_print_time) >= PRINT_INTERVAL_MS:
+                print("\n--- Current Robot State ---")
+                print("IR Sensors:", ir_values)
+                print("Error:", error)
+                print("Correction:", correction)
+                print(f"Left Speed: {left_speed}, Right Speed: {right_speed}")
+                print("Encoder 1 Count:", position1)
+                print("Encoder 2 Count:", position2)
+                print("Distance: {:.2f} cm".format(dist) if dist != -1 else "Ultrasonic: Timeout")
+                print("Button Pressed:", button_pressed)
+                print("Yaw angle (deg): {:.2f}".format(yaw_angle * 180/pi))
+                print("Obstacle Detected Flag:", obstacle_detected_flag)
+                print("Current Mission Index:", current_mission_idx)
+                print("Current Mission State:", "PICKUP" if current_mission_state == MISSION_STATE_PICKUP else "DELIVER" if current_mission_state == MISSION_STATE_DELIVER else "COMPLETE")
+                print("Current Pickup Node:", current_pickup_node)
+                print("Current Delivery Node:", current_delivery_node)
+                print("Current Node Index in Path:", current_path_idx) # Changed label
+                print("Next Node to Target in Path:", current_target_node) # Changed label
+                if calculated_path:
+                    print("Current Path:", calculated_path)
+                last_print_time = current_time_for_print # Update print timer
+
             sleep_ms(5) # Reduced sleep for more responsive main loop
             # This sleep is global for the main loop, so it affects sensor reading frequency
             # and motor updates for both forward line following and obstacle checking.
