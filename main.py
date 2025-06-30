@@ -219,14 +219,14 @@ KD_LF = 250  # Derivative gain (adjusted from 200, higher value for dampening os
 MAX_CORRECTION = 200 # Max correction applied to speed
 
 # PID constants for orientation turns
-KP_TURN = 250 # Proportional gain for turning
-KI_TURN = 5   # Integral gain for turning (newly added for drift avoidance)
-KD_TURN = 600 # Derivative gain for turning
+KP_TURN = 280 # Proportional gain for turning (slightly increased for responsiveness)
+KI_TURN = 8   # Integral gain for turning (increased for better drift correction)
+KD_TURN = 650 # Derivative gain for turning (increased for better damping)
 
 # New PID constants for reverse line following
-KP_LF_REV = 90  # Proportional gain for reverse line following (can be different from forward)
-KI_LF_REV = 0.5 # Integral gain for reverse line following
-KD_LF_REV = 250 # Derivative gain for reverse line following
+KP_LF_REV = 100 # Proportional gain for reverse line following (can be different from forward)
+KI_LF_REV = 0.8 # Integral gain for reverse line following (slightly increased)
+KD_LF_REV = 300 # Derivative gain for reverse line following (slightly increased)
 
 
 # ----- Node Detection Parameters ---
@@ -502,23 +502,22 @@ integral_turn = 0
 
 def orient_robot(target_yaw_radians, spin_in_place=True):
     """
-    Orients the robot to a target yaw angle using proportional-derivative (PD) control.
+    Orients the robot to a target yaw angle using proportional-integral-derivative (PID) control.
     Args:
         target_yaw_radians (float): The desired yaw angle in radians (-pi to pi).
         spin_in_place (bool): If True, spins in place (one wheel forward, one backward).
                               For this modification, we will force spin_in_place to be True.
     """
-    global yaw_angle, last_time, last_error_turn, integral_turn # Added last_error_turn, integral_turn
+    global yaw_angle, last_time, last_error_turn, integral_turn
 
     print(f"Orienting robot to {target_yaw_radians:.2f} rad ({target_yaw_radians * 180/pi:.2f} deg) (Spin in Place)...")
     
     target_yaw_radians = normalize_angle_rad(target_yaw_radians)
 
     turn_count = 0
-    max_turn_attempts = 1000 # Increased attempts for safety if turn is slow, allows more time for integral
+    max_turn_attempts = 1500 # Increased attempts for robustness in achieving target
 
-
-    # Re-initialize last_time, last_error_turn, and integral_turn for this specific turn operation for accurate dt and derivative
+    # Re-initialize PID terms for this specific turn operation for accurate dt and derivative
     last_time_turn_loop = ticks_ms()
     last_error_turn = get_shortest_angle_difference_rad(normalize_angle_rad(yaw_angle), target_yaw_radians)
     integral_turn = 0 # Reset integral term for each new turn
@@ -530,11 +529,11 @@ def orient_robot(target_yaw_radians, spin_in_place=True):
         current_time_loop = ticks_ms()
         dt_loop = (current_time_loop - last_time_turn_loop) / 1000.0 # Time in seconds
         
-        # Avoid division by zero and handle very small dt
-        if dt_loop == 0:
+        # Ensure dt_loop is not zero to prevent division errors in derivative
+        if dt_loop <= 0: # Use <= to catch 0 and negative time diffs if any
             sleep_ms(1) # Ensure some time passes for next measurement
             last_time_turn_loop = ticks_ms() # Update for next iteration
-            continue # Skip to next iteration if no time passed
+            continue # Skip to next iteration if no valid time passed
         
         # PID calculation for turning
         integral_turn += angle_diff * dt_loop
@@ -547,7 +546,7 @@ def orient_robot(target_yaw_radians, spin_in_place=True):
         # We take absolute value for clamping, then apply direction.
         abs_turn_power = abs(turn_power)
         TURN_SPEED = 600 # Maximum speed for turning (used for clamping)
-        abs_turn_power = max(50, min(abs_turn_power, TURN_SPEED)) 
+        abs_turn_power = max(70, min(abs_turn_power, TURN_SPEED)) # Increased minimum turn power slightly
 
         if angle_diff > 0: # Need to turn counter-clockwise (Left) - Left wheel back, Right wheel forward
             set_motor_speed(motor1_pwm, motor1_in2_pin, -abs_turn_power)
@@ -556,13 +555,13 @@ def orient_robot(target_yaw_radians, spin_in_place=True):
             set_motor_speed(motor1_pwm, motor1_in2_pin, abs_turn_power)
             set_motor_speed(motor2_pwm, motor2_in2_pin, -abs_turn_power)
 
-        # Update yaw angle based on gyro reading and dt
+        # Update yaw angle based on gyro reading and accurate dt
         gyro = mpu.get_gyro()
-        yaw_angle += (gyro['z'] * (pi / 180.0)) * dt_loop
+        yaw_angle += (gyro['z'] * (pi / 180.0)) * dt_loop # Integrate angular velocity (deg/s * rad/deg * s)
         yaw_angle = normalize_angle_rad(yaw_angle) # Keep yaw within -pi to pi
 
         last_time_turn_loop = current_time_loop # Update local last_time
-        sleep_ms(1) # Smallest practical sleep for fast loop
+        sleep_ms(1) # Smallest practical sleep for fast loop to get frequent gyro updates
         turn_count += 1
 
     stop_motors()
@@ -571,7 +570,7 @@ def orient_robot(target_yaw_radians, spin_in_place=True):
         print("Warning: Orientation reached max turn attempts. Might not be perfectly aligned due to timeout.")
 
     sleep(0.1) # Add a short sleep at the end to allow for physical settling
-    last_time = ticks_ms() # Update global last_time for consistency
+    last_time = ticks_ms() # Update global last_time for consistency in main loop
 
 def perform_180_turn():
     """Performs a 180-degree spin in place."""
@@ -647,9 +646,10 @@ def run_line_follower():
 
             # Update global yaw_angle using a consistent dt
             # This is critical. The dt should reflect the time elapsed since the last gyro reading.
-            # Here, we'll use dt_loop_lf for gyro integration too, ensuring consistency.
+            # Yaw angle is continuously integrated here to avoid drift over long periods.
             gyro = mpu.get_gyro()
-            yaw_angle += (gyro['z'] * (pi / 180.0)) * dt_loop_lf
+            if dt_loop_lf > 0: # Ensure dt is positive
+                yaw_angle += (gyro['z'] * (pi / 180.0)) * dt_loop_lf
             yaw_angle = normalize_angle_rad(yaw_angle) # Keep yaw within -pi to pi
             
             # Check if all missions are complete
@@ -791,7 +791,8 @@ def run_line_follower():
 
                             # Update yaw angle during backward movement as well
                             gyro_reverse = mpu.get_gyro()
-                            yaw_angle += (gyro_reverse['z'] * (pi / 180.0)) * dt_loop_rev
+                            if dt_loop_rev > 0: # Ensure dt is positive
+                                yaw_angle += (gyro_reverse['z'] * (pi / 180.0)) * dt_loop_rev
                             yaw_angle = normalize_angle_rad(yaw_angle)
 
                             if num_active_sensors_reverse > 0: # Line detected, apply line following
@@ -969,7 +970,8 @@ def run_line_follower():
 
                                     # Update yaw angle during backward movement as well
                                     gyro_reverse_delivery = mpu.get_gyro()
-                                    yaw_angle += (gyro_reverse_delivery['z'] * (pi / 180.0)) * dt_loop_rev_del
+                                    if dt_loop_rev_del > 0: # Ensure dt is positive
+                                        yaw_angle += (gyro_reverse_delivery['z'] * (pi / 180.0)) * dt_loop_rev_del
                                     yaw_angle = normalize_angle_rad(yaw_angle)
 
                                     if num_active_sensors_reverse_delivery > 0:
@@ -1198,5 +1200,4 @@ yaw_angle = pi / 2
 
 # Start the line following loop (robot will start moving after path is calculated and printed)
 run_line_follower()
-
 
