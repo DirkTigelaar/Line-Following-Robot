@@ -162,12 +162,13 @@ electromagnet = Pin(5, Pin.OUT)
 electromagnet.off()
 
 # IR line sensors (assuming 5 sensors: left_outer, left_inner, center, right_inner, right_outer)
+# Updated based on user's correction
 ir_pins = [
     Pin(39, Pin.IN), # Left-most
-    Pin(4, Pin.IN),
-    Pin(35, Pin.IN), # Center
-    Pin(34, Pin.IN),
-    Pin(36, Pin.IN)  # Right-most
+    Pin(36, Pin.IN),
+    Pin(34, Pin.IN), # Center
+    Pin(35, Pin.IN),
+    Pin(4, Pin.IN)   # Right-most
 ]
 
 # ----- Encoder Pins and Setup -----
@@ -216,6 +217,17 @@ KP_LF = 90   # Proportional gain (adjusted from 80)
 KI_LF = 0.5  # Integral gain (small value to reduce steady-state error)
 KD_LF = 250  # Derivative gain (adjusted from 200, higher value for dampening oscillations)
 MAX_CORRECTION = 200 # Max correction applied to speed
+
+# PID constants for orientation turns
+KP_TURN = 250 # Proportional gain for turning
+KI_TURN = 5   # Integral gain for turning (newly added for drift avoidance)
+KD_TURN = 600 # Derivative gain for turning
+
+# New PID constants for reverse line following
+KP_LF_REV = 90  # Proportional gain for reverse line following (can be different from forward)
+KI_LF_REV = 0.5 # Integral gain for reverse line following
+KD_LF_REV = 250 # Derivative gain for reverse line following
+
 
 # ----- Node Detection Parameters ---
 # Threshold for number of active sensors to consider it a node
@@ -476,17 +488,17 @@ TARGET_YAW_ANGLES = {
     'W': pi          # 180 degrees
 }
 
-# PD control constants for orientation turns
-KP_TURN = 250 # Proportional gain
-KD_TURN = 600 # Derivative gain (adjusted from 500, tune carefully to avoid jittering)
-TURN_SPEED = 600 # Maximum speed for turning (used for clamping)
-
 # Yaw tolerance: 1.5 degrees on each side
 YAW_TOLERANCE = 1.5 * (pi / 180.0) # Converted from 1.5 degrees to radians for precision
 
 # Global variables for PID line following
 last_error_lf = 0
 integral_lf = 0
+
+# Global variables for PID orientation
+last_error_turn = 0
+integral_turn = 0
+
 
 def orient_robot(target_yaw_radians, spin_in_place=True):
     """
@@ -496,20 +508,20 @@ def orient_robot(target_yaw_radians, spin_in_place=True):
         spin_in_place (bool): If True, spins in place (one wheel forward, one backward).
                               For this modification, we will force spin_in_place to be True.
     """
-    global yaw_angle, last_time, last_angle_diff_turn # Need to track last angle diff for derivative
+    global yaw_angle, last_time, last_error_turn, integral_turn # Added last_error_turn, integral_turn
 
     print(f"Orienting robot to {target_yaw_radians:.2f} rad ({target_yaw_radians * 180/pi:.2f} deg) (Spin in Place)...")
     
     target_yaw_radians = normalize_angle_rad(target_yaw_radians)
 
     turn_count = 0
-    max_turn_attempts = 750 # Increased attempts for safety if turn is slow
+    max_turn_attempts = 1000 # Increased attempts for safety if turn is slow, allows more time for integral
 
 
-    # Re-initialize last_time and last_angle_diff_turn for this specific turn operation for accurate dt and derivative
+    # Re-initialize last_time, last_error_turn, and integral_turn for this specific turn operation for accurate dt and derivative
     last_time_turn_loop = ticks_ms()
-    last_angle_diff_turn = get_shortest_angle_difference_rad(normalize_angle_rad(yaw_angle), target_yaw_radians)
-
+    last_error_turn = get_shortest_angle_difference_rad(normalize_angle_rad(yaw_angle), target_yaw_radians)
+    integral_turn = 0 # Reset integral term for each new turn
 
     while abs(get_shortest_angle_difference_rad(yaw_angle, target_yaw_radians)) > YAW_TOLERANCE and turn_count < max_turn_attempts:
         current_yaw_normalized = normalize_angle_rad(yaw_angle)
@@ -518,21 +530,23 @@ def orient_robot(target_yaw_radians, spin_in_place=True):
         current_time_loop = ticks_ms()
         dt_loop = (current_time_loop - last_time_turn_loop) / 1000.0 # Time in seconds
         
-        # Calculate derivative term for turn (rate of change of error)
-        derivative_turn = 0
-        if dt_loop > 0:
-            derivative_turn = (angle_diff - last_angle_diff_turn) / dt_loop
-        last_angle_diff_turn = angle_diff # Update last angle diff for next iteration
-        last_time_turn_loop = current_time_loop # Update local last_time
+        # Avoid division by zero and handle very small dt
+        if dt_loop == 0:
+            sleep_ms(1) # Ensure some time passes for next measurement
+            last_time_turn_loop = ticks_ms() # Update for next iteration
+            continue # Skip to next iteration if no time passed
+        
+        # PID calculation for turning
+        integral_turn += angle_diff * dt_loop
+        derivative_turn = (angle_diff - last_error_turn) / dt_loop
+        last_error_turn = angle_diff
 
-        # Proportional-Derivative control for turning
-        # The further away from target, the higher the proportional power
-        # The derivative term helps to dampen oscillations (negative sign)
-        turn_power = int((angle_diff * KP_TURN) - (derivative_turn * KD_TURN))
+        turn_power = int((angle_diff * KP_TURN) + (integral_turn * KI_TURN) + (derivative_turn * KD_TURN))
 
         # Clamp turn_power to ensure it's within motor limits and has a minimum to move
         # We take absolute value for clamping, then apply direction.
         abs_turn_power = abs(turn_power)
+        TURN_SPEED = 600 # Maximum speed for turning (used for clamping)
         abs_turn_power = max(50, min(abs_turn_power, TURN_SPEED)) 
 
         if angle_diff > 0: # Need to turn counter-clockwise (Left) - Left wheel back, Right wheel forward
@@ -542,27 +556,22 @@ def orient_robot(target_yaw_radians, spin_in_place=True):
             set_motor_speed(motor1_pwm, motor1_in2_pin, abs_turn_power)
             set_motor_speed(motor2_pwm, motor2_in2_pin, -abs_turn_power)
 
-        # Update yaw angle
+        # Update yaw angle based on gyro reading and dt
         gyro = mpu.get_gyro()
-        # Note: dt_loop for gyro integration is already updated above.
         yaw_angle += (gyro['z'] * (pi / 180.0)) * dt_loop
         yaw_angle = normalize_angle_rad(yaw_angle) # Keep yaw within -pi to pi
 
-        sleep_ms(1) # Smaller sleep time for faster control loop within turn
+        last_time_turn_loop = current_time_loop # Update local last_time
+        sleep_ms(1) # Smallest practical sleep for fast loop
         turn_count += 1
 
     stop_motors()
     print(f"Robot oriented. Final Yaw: {normalize_angle_rad(yaw_angle):.2f} rad ({normalize_angle_rad(yaw_angle) * 180/pi:.2f} deg)")
     if turn_count >= max_turn_attempts:
-        print("Warning: Orientation reached max turn attempts. Might not be perfectly aligned.")
+        print("Warning: Orientation reached max turn attempts. Might not be perfectly aligned due to timeout.")
 
-    # Add a short sleep at the end to allow for physical settling
-    sleep(0.1) 
-
-    # After orientation, ensure global last_time is updated to prevent large dt jump in main loop
-    # This `last_time` is less critical now as `dt_loop_lf` handles PID timing.
-    # However, keeping it updated is good practice for any other global time-dependent operations.
-    last_time = ticks_ms() 
+    sleep(0.1) # Add a short sleep at the end to allow for physical settling
+    last_time = ticks_ms() # Update global last_time for consistency
 
 def perform_180_turn():
     """Performs a 180-degree spin in place."""
@@ -581,7 +590,7 @@ def run_line_follower():
            last_error_lf, integral_lf # Declare global for PID
 
     # Define weights locally within the function to ensure scope
-    weights = [-2, -1, 0, 1, 2] # Weights for error calculation
+    weights = [-2, -1, 0, 1, 2] # Weights for error calculation. Assumes sensors are arranged Left-most to Right-most physically.
 
     # Initialize the first mission target
     if MISSION_PLAN:
@@ -767,7 +776,7 @@ def run_line_follower():
                         start_reverse_time = ticks_ms()
                         reversed_to_node = False
                         
-                        # Reset PID for backward line following
+                        # Reset PID for backward line following for this new segment
                         last_error_lf = 0
                         integral_lf = 0
                         last_loop_time_reverse = ticks_ms() # New local variable for dt during reverse
@@ -789,18 +798,21 @@ def run_line_follower():
                                 weighted_sum_reverse = sum(weights[i] for i, val in enumerate(ir_values_reverse) if val == 0)
                                 current_error_reverse = weighted_sum_reverse # Changed to direct sum
                                 
-                                # PID calculation for backward line following
+                                # PID calculation for backward line following using new constants
                                 integral_lf += current_error_reverse * dt_loop_rev
                                 derivative_lf = (current_error_reverse - last_error_lf) / dt_loop_rev if dt_loop_rev > 0 else 0
                                 last_error_lf = current_error_reverse
 
-                                correction_reverse = int((KP_LF * current_error_reverse) + (KI_LF * integral_lf) + (KD_LF * derivative_lf))
+                                correction_reverse = int((KP_LF_REV * current_error_reverse) + (KI_LF_REV * integral_lf) + (KD_LF_REV * derivative_lf))
                                 # Clamp correction
                                 correction_reverse = max(-MAX_CORRECTION, min(correction_reverse, MAX_CORRECTION))
 
                                 # Corrected logic for backward line following:
-                                left_speed_rev = -REVERSE_SPEED - correction_reverse
-                                right_speed_rev = -REVERSE_SPEED + correction_reverse
+                                # If `correction_reverse` is positive (robot needs to move its rear to the left relative to the line),
+                                # the left wheel should move less backward (less negative speed), and
+                                # the right wheel should move more backward (more negative speed).
+                                left_speed_rev = -REVERSE_SPEED + correction_reverse
+                                right_speed_rev = -REVERSE_SPEED - correction_reverse
 
                                 # Ensure speeds are within valid range (0-1023 magnitude)
                                 left_speed_rev = max(-1023, min(left_speed_rev, 0))
@@ -942,7 +954,7 @@ def run_line_follower():
                                 start_reverse_time_delivery = ticks_ms()
                                 reversed_to_node_delivery = False
                                 
-                                # Reset PID for backward line following
+                                # Reset PID for backward line following for this new segment
                                 last_error_lf = 0
                                 integral_lf = 0
                                 last_loop_time_reverse_delivery = ticks_ms() # New local variable for dt during reverse
@@ -964,18 +976,21 @@ def run_line_follower():
                                         weighted_sum_reverse_delivery = sum(weights[i] for i, val in enumerate(ir_values_reverse_delivery) if val == 0)
                                         current_error_reverse_delivery = weighted_sum_reverse_delivery # Changed to direct sum
                                         
-                                        # PID calculation for backward line following
+                                        # PID calculation for backward line following using new constants
                                         integral_lf += current_error_reverse_delivery * dt_loop_rev_del
                                         derivative_lf = (current_error_reverse_delivery - last_error_lf) / dt_loop_rev_del if dt_loop_rev_del > 0 else 0
                                         last_error_lf = current_error_reverse_delivery
 
-                                        correction_reverse_delivery = int((KP_LF * current_error_reverse_delivery) + (KI_LF * integral_lf) + (KD_LF * derivative_lf))
+                                        correction_reverse_delivery = int((KP_LF_REV * current_error_reverse_delivery) + (KI_LF_REV * integral_lf) + (KD_LF_REV * derivative_lf))
                                         # Clamp correction
                                         correction_reverse_delivery = max(-MAX_CORRECTION, min(correction_reverse_delivery, MAX_CORRECTION))
 
                                         # Corrected logic for backward line following:
-                                        left_speed_rev_del = -REVERSE_SPEED - correction_reverse_delivery
-                                        right_speed_rev_del = -REVERSE_SPEED + correction_reverse_delivery
+                                        # If `correction_reverse_delivery` is positive (robot needs to move its rear to the left relative to the line),
+                                        # the left wheel should move less backward (less negative speed), and
+                                        # the right wheel should move more backward (more negative speed).
+                                        left_speed_rev_del = -REVERSE_SPEED + correction_reverse_delivery
+                                        right_speed_rev_del = -REVERSE_SPEED - correction_reverse_delivery
 
                                         left_speed_rev_del = max(-1023, min(left_speed_rev_del, 0))
                                         right_speed_rev_del = max(-1023, min(right_speed_rev_del, 0))
@@ -1183,4 +1198,5 @@ yaw_angle = pi / 2
 
 # Start the line following loop (robot will start moving after path is calculated and printed)
 run_line_follower()
+
 
