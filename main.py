@@ -233,7 +233,7 @@ KD_LF_REV = 300 # Derivative gain for reverse line following (slightly increased
 # Threshold for number of active sensors to consider it a node
 NODE_SENSOR_THRESHOLD = 3
 # Time to stop at a node (in ms)
-NODE_STOP_TIME_MS = 750
+NODE_STOP_TIME_MS = 250
 # Cooldown period for node detection (in ms)
 NODE_DETECTION_COOLDOWN_MS = 2000 # 2 seconds
 
@@ -396,7 +396,7 @@ def block_path_segment_by_weight(node1, node2, grid, new_weight=1000.0):
             break
     
     # Block path from node2 to node1 (for bidirectional segments)
-    for direction, info in grid[node2].items():
+    for direction, info in grid[2].items():
         if info and info[0] == node1:
             grid[node2][direction] = (node1, new_weight)
             print(f"Path from {node2} to {node1} ({direction}) weight increased to {new_weight}")
@@ -826,8 +826,6 @@ def run_line_follower():
                             ir_values_reverse = [pin.value() for pin in ir_pins]
                             num_active_sensors_reverse = sum(1 for val in ir_values_reverse if val == 0)
 
-                            # Yaw angle is continuously updated by the main loop's global yaw update, no special handling needed here
-
                             if num_active_sensors_reverse > 0: # Line detected, apply line following
                                 weighted_sum_reverse = sum(weights[i] for i, val in enumerate(ir_values_reverse) if val == 0)
                                 current_error_reverse = weighted_sum_reverse # Changed to direct sum
@@ -943,7 +941,8 @@ def run_line_follower():
                 # --- Node Detection Logic with Cooldown ---
                 if is_node_detected_robust(ir_values, num_active_sensors):
                     if (current_time - last_node_detection_time) >= NODE_DETECTION_COOLDOWN_MS:
-                        # The robot has just arrived at the node *before* current_target_node
+                        # The robot has just arrived at a node.
+                        # node_just_arrived_at will be the node the robot is currently physically at.
                         node_just_arrived_at = calculated_path[current_path_idx - 1] if current_path_idx > 0 else calculated_path[0]
                         
                         stop_motors()
@@ -951,26 +950,79 @@ def run_line_follower():
                         sleep_ms(NODE_STOP_TIME_MS)
                         
                         print("Driving forward for 1 second to clear node with wheels...")
-                        drive_straight_for_time(BASE_SPEED, 1.0)
-                        print("Cleared node.")
+                        drive_straight_for_time(BASE_SPEED, 1.0) # Robot is now past Node_X, centered.
 
                         last_node_detection_time = current_time
                         last_loop_time_lf_pid = ticks_ms() 
                         last_error_lf = 0
                         integral_lf = 0
 
-                        # --- DELIVERY LOGIC ---
-                        # Check if the current target node (calculated_path[current_path_idx]) is the delivery P-node
-                        # This means we have arrived at `node_just_arrived_at` which is the node *before* the delivery P-node
-                        if current_mission_state == MISSION_STATE_DELIVER and \
-                           current_path_idx < len(calculated_path) and \
-                           calculated_path[current_path_idx] == current_delivery_node:
+                        # Check if the node we just arrived at is the final pickup node in the current path
+                        if current_mission_state == MISSION_STATE_PICKUP and node_just_arrived_at == current_pickup_node:
+                            print(f"Arrived at pickup node {node_just_arrived_at}. Waiting for button press to pick up.")
+                            # Do not increment path_idx here, as the button press will handle the transition.
+                            stop_motors() # Ensure it stays stopped
+                            continue # Go back to main loop, waiting for button
+
+                        # Check if the *next* node in the path is the delivery P-node.
+                        # This means we just arrived at the node *before* the delivery P-node.
+                        elif current_mission_state == MISSION_STATE_DELIVER and \
+                             (current_path_idx + 1) < len(calculated_path) and \
+                             calculated_path[current_path_idx + 1] == current_delivery_node:
                             
+                            # Increment current_path_idx to point to the delivery P-node itself for correct logging
+                            current_path_idx += 1
+                            current_target_node = calculated_path[current_path_idx] # This is the P-node
+
                             print(f"*** Approaching delivery node {current_delivery_node} from {node_just_arrived_at}. Performing delivery sequence. ***")
                             
                             # Drive forward for a few seconds into the delivery spot (towards P-node)
                             print("Driving forward for 2.0 seconds to position for delivery...")
                             drive_straight_for_time(BASE_SPEED, 2.0)
+                            
+                            # NEW: Line following for 2 seconds after initial drive into P-node
+                            print("Performing 2 seconds of line following into the delivery spot...")
+                            start_line_follow_delivery_time = ticks_ms()
+                            temp_last_error_lf = 0 # Temporary PID state for this short segment
+                            temp_integral_lf = 0
+                            temp_last_loop_time_lf_pid = ticks_ms()
+
+                            while ticks_diff(ticks_ms(), start_line_follow_delivery_time) < 2000: # 2 seconds
+                                current_time_loop_del_lf = ticks_ms()
+                                dt_loop_del_lf = (current_time_loop_del_lf - temp_last_loop_time_lf_pid) / 1000.0
+                                temp_last_loop_time_lf_pid = current_time_loop_del_lf
+
+                                ir_values_del_lf = [pin.value() for pin in ir_pins]
+                                num_active_sensors_del_lf = sum(1 for val in ir_values_del_lf if val == 0)
+
+                                if num_active_sensors_del_lf > 0:
+                                    weighted_sum_del_lf = sum(weights[i] for i, val in enumerate(ir_values_del_lf) if val == 0)
+                                    current_error_del_lf = weighted_sum_del_lf
+                                    
+                                    integral_lf += current_error_del_lf * dt_loop_del_lf
+                                    derivative_del_lf = (current_error_del_lf - temp_last_error_lf) / dt_loop_del_lf if dt_loop_del_lf > 0 else 0
+                                    temp_last_error_lf = current_error_del_lf
+
+                                    correction_del_lf = int((KP_LF * current_error_del_lf) + (KI_LF * temp_integral_lf) + (KD_LF * derivative_del_lf))
+                                    correction_del_lf = max(-MAX_CORRECTION, min(correction_del_lf, MAX_CORRECTION))
+
+                                    left_speed_del_lf = BASE_SPEED + correction_del_lf
+                                    right_speed_del_lf = BASE_SPEED - correction_del_lf
+
+                                    left_speed_del_lf = max(0, min(left_speed_del_lf, 1023))
+                                    right_speed_del_lf = max(0, min(right_speed_del_lf, 1023))
+
+                                    set_motor_speed(motor1_pwm, motor1_in2_pin, left_speed_del_lf)
+                                    set_motor_speed(motor2_pwm, motor2_in2_pin, right_speed_del_lf)
+                                else:
+                                    # If line is lost during this short segment, just drive straight
+                                    set_motor_speed(motor1_pwm, motor1_in2_pin, BASE_SPEED)
+                                    set_motor_speed(motor2_pwm, motor2_in2_pin, BASE_SPEED)
+                                    temp_integral_lf = 0
+                                    temp_last_error_lf = 0
+                                sleep_ms(5)
+                            stop_motors()
+                            print("2 seconds of line following complete.")
                             
                             print("Deactivating electromagnet to drop box.")
                             electromagnet.off()
@@ -1071,36 +1123,11 @@ def run_line_follower():
                                 stop_motors()
                                 return
                             
-                            # IMPORTANT: After completing delivery and setting up next mission,
-                            # we should skip the rest of the node handling for this iteration
-                            # to prevent unintended path_idx increments.
                             continue # Restart the main while loop
-                        # --- END DELIVERY LOGIC ---
-
-                        # --- GENERAL NODE TRAVERSAL LOGIC (for intermediate nodes or pickup nodes) ---
-                        # This block executes if it's NOT a delivery approach to a P-node
-                        # and it's a regular node detection.
                         
-                        # Check if the arrived node was the mission stage goal (for pickup, or if delivery was already handled)
-                        target_goal_for_mission_stage = ""
-                        if current_mission_state == MISSION_STATE_PICKUP:
-                            target_goal_for_mission_stage = current_pickup_node
-                        # If current_mission_state is DELIVER, and it's not the special P-node delivery approach,
-                        # then it's an intermediate node on the way to the P-node.
-                        # If current_mission_state is COMPLETE, we should not be here.
-
-                        if node_just_arrived_at == target_goal_for_mission_stage and current_mission_state == MISSION_STATE_PICKUP:
-                            # This handles the case where the robot arrives at the pickup node
-                            # without the button being pressed yet (e.g., if it's a node like A1, A2, etc., not a P-node).
-                            # The actual pickup logic is triggered by the button press.
-                            # For now, if we arrive at a pickup node, we just continue line following
-                            # until the button is pressed.
-                            print(f"Arrived at pickup node {node_just_arrived_at}. Waiting for button press to pick up.")
-                            # Do not increment path_idx here, as the button press will handle the transition.
-                            pass # We will continue line following until button is pressed.
-                        
+                        # If neither of the above special cases (final pickup or delivery P-node approach)
+                        # then it's a regular intermediate node, so increment path_idx for traversal.
                         elif current_path_idx + 1 < len(calculated_path): 
-                            # This is a regular intermediate node, advance to the next target.
                             current_path_idx += 1
                             current_target_node = calculated_path[current_path_idx]
                             
@@ -1116,13 +1143,11 @@ def run_line_follower():
                                 orient_robot(target_yaw)
                             print(f"Node Detection & Orientation: Next Node to Target set to {current_target_node}")
                         else:
-                            # This means current_path_idx was already the last index, and we just arrived at the final node
-                            # for a non-delivery scenario (e.g., reached a pickup node, or end of mission path without pickup/delivery).
-                            print("End of current calculated path reached. Waiting for next mission step or full mission complete (unhandled case).")
-                            stop_motors()
-                        
-                        # After any node handling (except for delivery which has its own continue),
-                        # line following will resume naturally or the robot will stay stopped if at the goal.
+                            # This means we arrived at the very last node in the path, and it's not a P-node for delivery.
+                            # This would be the final pickup node, or the very end of the mission.
+                            print(f"Arrived at final node {node_just_arrived_at} in path. Waiting for next action (e.g., button press for pickup or mission completion).")
+                            stop_motors() # Stay stopped
+                            continue # Restart main loop to await external trigger (button) or mission end.
 
                 # Continue with line following if not at goal, not handling obstacle, and not waiting for button
                 if not button_pressed or not (current_mission_state == MISSION_STATE_PICKUP and calculated_path[current_path_idx] == current_pickup_node):
@@ -1191,7 +1216,7 @@ def run_line_follower():
                 last_print_time = current_time_for_print # Update print timer
 
             sleep_ms(5) # Reduced sleep for more responsive main loop
-            # This sleep is global for the main loop, so it affects sensor reading frequency
+            # This sleep is gDlobal for the main loop, so it affects sensor reading frequency
             # and motor updates for both forward line following and obstacle checking.
 
     except KeyboardInterrupt:
