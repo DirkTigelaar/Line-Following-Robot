@@ -473,7 +473,8 @@ current_delivery_node = ""
 
 # Global variables for yaw calculation and node detection cooldown
 yaw_angle = 0.0 # Yaw angle in radians
-last_time = ticks_ms() # This 'last_time' is now primarily for orient_robot and overall system time.
+# This 'last_yaw_update_time' is the *single source* for calculating dt for continuous yaw updates.
+last_yaw_update_time = ticks_ms() 
 last_node_detection_time = 0 # Initialize for cooldown
 obstacle_detected_flag = False # New global flag for obstacle detection
 
@@ -514,12 +515,16 @@ def drive_straight_for_time(speed, duration_seconds):
         speed (int): The forward speed (0-1023).
         duration_seconds (float): The time in seconds to drive.
     """
+    global last_yaw_update_time # Need to update the global yaw timer after this operation
+
     print(f"Driving straight at {speed} for {duration_seconds} seconds...")
     set_motor_speed(motor1_pwm, motor1_in2_pin, speed)
     set_motor_speed(motor2_pwm, motor2_in2_pin, speed)
     sleep(duration_seconds)
     stop_motors()
     print("Straight drive complete.")
+    # After a timed drive, synchronize the global yaw update time
+    last_yaw_update_time = ticks_ms() 
 # --- END NEW FUNCTION ---
 
 def orient_robot(target_yaw_radians, spin_in_place=True):
@@ -530,7 +535,7 @@ def orient_robot(target_yaw_radians, spin_in_place=True):
         spin_in_place (bool): If True, spins in place (one wheel forward, one backward).
                               For this modification, we will force spin_in_place to be True.
     """
-    global yaw_angle, last_time, last_error_turn, integral_turn
+    global yaw_angle, last_error_turn, integral_turn, last_yaw_update_time
 
     print(f"Orienting robot to {target_yaw_radians:.2f} rad ({target_yaw_radians * 180/pi:.2f} deg) (Spin in Place)...")
     
@@ -540,7 +545,7 @@ def orient_robot(target_yaw_radians, spin_in_place=True):
     max_turn_attempts = 1500 # Increased attempts for robustness in achieving target
 
     # Re-initialize PID terms for this specific turn operation for accurate dt and derivative
-    last_time_turn_loop = ticks_ms()
+    last_time_turn_loop = ticks_ms() # Local last_time for this tight PID loop
     last_error_turn = get_shortest_angle_difference_rad(normalize_angle_rad(yaw_angle), target_yaw_radians)
     integral_turn = 0 # Reset integral term for each new turn
 
@@ -592,7 +597,8 @@ def orient_robot(target_yaw_radians, spin_in_place=True):
         print("Warning: Orientation reached max turn attempts. Might not be perfectly aligned due to timeout.")
 
     sleep(0.1) # Add a short sleep at the end to allow for physical settling
-    last_time = ticks_ms() # Update global last_time for consistency in main loop
+    # After orientation, synchronize the global yaw update time
+    last_yaw_update_time = ticks_ms() 
 
 def perform_180_turn():
     """Performs a 180-degree spin in place."""
@@ -608,7 +614,7 @@ def run_line_follower():
     global yaw_angle, current_path_idx, last_node_detection_time, obstacle_detected_flag, \
            calculated_path, current_mission_idx, current_mission_state, \
            current_pickup_node, current_delivery_node, current_target_node, \
-           last_error_lf, integral_lf, last_print_time # Declare global for PID and printing timer
+           last_error_lf, integral_lf, last_print_time, last_yaw_update_time # Declare global for PID and printing timer
 
     # Define weights locally within the function to ensure scope
     weights = [-2, -1, 0, 1, 2] # Weights for error calculation. Assumes sensors are arranged Left-most to Right-most physically.
@@ -651,30 +657,37 @@ def run_line_follower():
         return
 
     # Initialize local last_time for precise dt calculation within line follower loop
-    last_loop_time = ticks_ms() # New local variable for dt calculation within this loop
+    # This one will be for the PID control inside the loop.
+    last_loop_time_lf_pid = ticks_ms() 
     last_print_time = ticks_ms() # Initialize print timer
 
     try:
         while True:
+            # --- START: Global Yaw Angle Update (Continuous) ---
+            current_time = ticks_ms()
+            dt_yaw = (current_time - last_yaw_update_time) / 1000.0 # Time in seconds for yaw integration
+            last_yaw_update_time = current_time # Update for next iteration of global yaw tracking
+
+            # Update global yaw_angle based on gyro reading and accurate dt_yaw
+            gyro = mpu.get_gyro()
+            if dt_yaw > 0: # Ensure dt is positive
+                yaw_angle += (gyro['z'] * (pi / 180.0)) * dt_yaw
+            yaw_angle = normalize_angle_rad(yaw_angle) # Keep yaw within -pi to pi
+            # --- END: Global Yaw Angle Update (Continuous) ---
+
+
             # Initialize speeds, error, and correction for printing, default to 0
             left_speed = 0
             right_speed = 0
             error = 'N/A'
             correction = 'N/A'
 
-            # Calculate dt for the current loop iteration
-            current_loop_time = ticks_ms()
-            dt_loop_lf = (current_loop_time - last_loop_time) / 1000.0 # Time in seconds for PID
-            last_loop_time = current_loop_time # Update for the next iteration
+            # Calculate dt for the current line follower PID iteration
+            current_loop_time_lf_pid = ticks_ms()
+            dt_loop_lf = (current_loop_time_lf_pid - last_loop_time_lf_pid) / 1000.0 # Time in seconds for PID
+            last_loop_time_lf_pid = current_loop_time_lf_pid # Update for the next iteration
 
-            # Update global yaw_angle using a consistent dt
-            # This is critical. The dt should reflect the time elapsed since the last gyro reading.
-            # Yaw angle is continuously integrated here to avoid drift over long periods.
-            gyro = mpu.get_gyro()
-            if dt_loop_lf > 0: # Ensure dt is positive
-                yaw_angle += (gyro['z'] * (pi / 180.0)) * dt_loop_lf
-            yaw_angle = normalize_angle_rad(yaw_angle) # Keep yaw within -pi to pi
-            
+
             # Check if all missions are complete
             if current_mission_state == MISSION_STATE_COMPLETE:
                 print("\n*** ALL MISSIONS COMPLETE! Robot is idle. ***")
@@ -723,7 +736,7 @@ def run_line_follower():
                     else:
                         print("Warning: Could not determine valid segment to block due to path length or index issues. Proceeding with recalculation anyway.")
                         
-                    perform_180_turn()
+                    perform_180_turn() # This function will update last_yaw_update_time
                     
                     # Recalculate path from the last successfully reached node to the goal.
                     # This needs to be the node we were *approaching* or *at* when the obstacle was detected.
@@ -755,7 +768,7 @@ def run_line_follower():
                             if direction_to_next and direction_to_next in TARGET_YAW_ANGLES:
                                 target_yaw = TARGET_YAW_ANGLES[direction_to_next]
                                 print(f"Orienting from {current_node_for_orient} towards {current_target_node} ({direction_to_next}). Target Yaw: {target_yaw * 180/pi:.2f} deg")
-                                orient_robot(target_yaw)
+                                orient_robot(target_yaw) # This function will update last_yaw_update_time
                             print(f"Obstacle path recalculation: Next Node to Target set to {current_target_node}") # Debug print
                         else: # Path is just one node (robot is already at the target)
                             current_path_idx = 0
@@ -802,21 +815,18 @@ def run_line_follower():
                         # Reset PID for backward line following for this new segment
                         last_error_lf = 0
                         integral_lf = 0
-                        last_loop_time_reverse = ticks_ms() # New local variable for dt during reverse
+                        # Re-initialize PID dt for reverse line following
+                        last_loop_time_lf_pid = ticks_ms() 
 
                         while ticks_diff(ticks_ms(), start_reverse_time) < 3000: # Max 3 seconds reverse
                             current_time_loop_rev = ticks_ms()
-                            dt_loop_rev = (current_time_loop_rev - last_loop_time_reverse) / 1000.0
-                            last_loop_time_reverse = current_time_loop_rev # Update local last_time
+                            dt_loop_rev = (current_time_loop_rev - last_loop_time_lf_pid) / 1000.0 # Use main PID dt variable
+                            last_loop_time_lf_pid = current_time_loop_rev # Update for next iteration
 
                             ir_values_reverse = [pin.value() for pin in ir_pins]
                             num_active_sensors_reverse = sum(1 for val in ir_values_reverse if val == 0)
 
-                            # Update yaw angle during backward movement as well
-                            gyro_reverse = mpu.get_gyro()
-                            if dt_loop_rev > 0: # Ensure dt is positive
-                                yaw_angle += (gyro_reverse['z'] * (pi / 180.0)) * dt_loop_rev
-                            yaw_angle = normalize_angle_rad(yaw_angle)
+                            # Yaw angle is continuously updated by the main loop's global yaw update, no special handling needed here
 
                             if num_active_sensors_reverse > 0: # Line detected, apply line following
                                 weighted_sum_reverse = sum(weights[i] for i, val in enumerate(ir_values_reverse) if val == 0)
@@ -863,13 +873,14 @@ def run_line_follower():
                         
                         # Use the new drive_straight_for_time function for centering
                         print("Driving forward for 1.5 seconds to center on intersection...")
-                        drive_straight_for_time(BASE_SPEED, 1.5)
+                        drive_straight_for_time(BASE_SPEED, 1.5) # This will update last_yaw_update_time
                         print("Centered on intersection.")
 
                         # Reset PID for forward line following after stopping at node
                         last_error_lf = 0
                         integral_lf = 0
-                        last_loop_time = ticks_ms() # Reset loop time after this pause
+                        # Re-initialize PID dt after this operation
+                        last_loop_time_lf_pid = ticks_ms() 
 
                         # The robot is now logically at the node from which it entered the P-node dead-end.
                         # For P1, it's A1; for P2, it's A2, etc.
@@ -887,7 +898,7 @@ def run_line_follower():
                                 # After reversing, the robot is at calculated_path[0] (which is entry_node_to_pickup).
                                 # Its first target for this new path is calculated_path[1].
                                 if len(calculated_path) > 1:
-                                    current_path_idx = 1 # Index of the first actual target node in the new path
+                                    current_path_idx = 1 # New path, so first target is index 1
                                     current_target_node = calculated_path[current_path_idx]
                                     
                                     current_node_for_orient = calculated_path[0] # The node robot is currently at
@@ -895,7 +906,7 @@ def run_line_follower():
                                     if direction_to_next and direction_to_next in TARGET_YAW_ANGLES:
                                         target_yaw = TARGET_YAW_ANGLES[direction_to_next]
                                         print(f"Orienting from {current_node_for_orient} towards {current_target_node} ({direction_to_next}). Target Yaw: {target_yaw * 180/pi:.2f} deg")
-                                        orient_robot(target_yaw)
+                                        orient_robot(target_yaw) # This function will update last_yaw_update_time
                                     print(f"Pickup Path Recalculation: Next Node to Target set to {current_target_node}") # Debug print
                                 else:
                                     current_path_idx = 0 # Single node path (e.g., if delivery node is same as entry node)
@@ -931,7 +942,7 @@ def run_line_follower():
 
                 # --- Node Detection Logic with Cooldown ---
                 if is_node_detected_robust(ir_values, num_active_sensors):
-                    if (current_loop_time - last_node_detection_time) >= NODE_DETECTION_COOLDOWN_MS:
+                    if (current_time - last_node_detection_time) >= NODE_DETECTION_COOLDOWN_MS: # Use current_time from main loop
                         # The robot just arrived at calculated_path[current_path_idx]
                         arrived_node_name = calculated_path[current_path_idx]
                         
@@ -941,11 +952,12 @@ def run_line_follower():
                         
                         # Drive forward for 1 second to clear the node (important for small bots)
                         print("Driving forward for 1 second to clear node with wheels...")
-                        drive_straight_for_time(BASE_SPEED, 1.0) # Use the new function here
+                        drive_straight_for_time(BASE_SPEED, 1.0) # This will update last_yaw_update_time
                         print("Cleared node.")
 
-                        last_node_detection_time = current_loop_time # Update last detection time
-                        last_loop_time = ticks_ms() # Reset loop time after this pause
+                        last_node_detection_time = current_time # Update last detection time using current_time
+                        # Re-initialize PID dt after this operation
+                        last_loop_time_lf_pid = ticks_ms() 
 
                         # Reset PID for forward line following after stopping at node
                         last_error_lf = 0
@@ -976,21 +988,18 @@ def run_line_follower():
                                 # Reset PID for backward line following for this new segment
                                 last_error_lf = 0
                                 integral_lf = 0
-                                last_loop_time_reverse_delivery = ticks_ms() # New local variable for dt during reverse
+                                # Re-initialize PID dt for reverse line following
+                                last_loop_time_lf_pid = ticks_ms()
 
                                 while ticks_diff(ticks_ms(), start_reverse_time_delivery) < 3000: # Max 3 seconds reverse
                                     current_time_loop_rev_del = ticks_ms()
-                                    dt_loop_rev_del = (current_time_loop_rev_del - last_loop_time_reverse_delivery) / 1000.0
-                                    last_loop_time_reverse_delivery = current_time_loop_rev_del # Update local last_time
+                                    dt_loop_rev_del = (current_time_loop_rev_del - last_loop_time_lf_pid) / 1000.0
+                                    last_loop_time_lf_pid = current_time_loop_rev_del # Update local last_time
 
                                     ir_values_reverse_delivery = [pin.value() for pin in ir_pins]
                                     num_active_sensors_reverse_delivery = sum(1 for val in ir_values_reverse_delivery if val == 0)
 
-                                    # Update yaw angle during backward movement as well
-                                    gyro_reverse_delivery = mpu.get_gyro()
-                                    if dt_loop_rev_del > 0: # Ensure dt is positive
-                                        yaw_angle += (gyro_reverse_delivery['z'] * (pi / 180.0)) * dt_loop_rev_del
-                                    yaw_angle = normalize_angle_rad(yaw_angle)
+                                    # Yaw angle is continuously updated by the main loop's global yaw update, no special handling needed here
 
                                     if num_active_sensors_reverse_delivery > 0:
                                         weighted_sum_reverse_delivery = sum(weights[i] for i, val in enumerate(ir_values_reverse_delivery) if val == 0)
@@ -1036,13 +1045,14 @@ def run_line_follower():
                                 
                                 # Use the new drive_straight_for_time function for centering
                                 print("Driving forward for 1.5 seconds to center on intersection (delivery)...")
-                                drive_straight_for_time(BASE_SPEED, 1.5)
+                                drive_straight_for_time(BASE_SPEED, 1.5) # This will update last_yaw_update_time
                                 print("Centered on intersection (delivery).")
 
                                 # Reset PID for forward line following after stopping at node
                                 last_error_lf = 0
                                 integral_lf = 0
-                                last_loop_time = ticks_ms() # Reset loop time after this pause
+                                # Re-initialize PID dt after this operation
+                                last_loop_time_lf_pid = ticks_ms() 
 
                                 # Move to next mission or complete
                                 current_mission_idx += 1
@@ -1072,7 +1082,7 @@ def run_line_follower():
                                                 if direction_to_next and direction_to_next in TARGET_YAW_ANGLES:
                                                     target_yaw = TARGET_YAW_ANGLES[direction_to_next]
                                                     print(f"Orienting from {current_node_for_orient} towards {current_target_node} ({direction_to_next}). Target Yaw: {target_yaw * 180/pi:.2f} deg")
-                                                    orient_robot(target_yaw)
+                                                    orient_robot(target_yaw) # This function will update last_yaw_update_time
                                                 print(f"Delivery Next Mission Path Recalculation: Next Node to Target set to {current_target_node}") # Debug print
                                             else:
                                                 current_path_idx = 0
@@ -1115,7 +1125,7 @@ def run_line_follower():
                                 target_yaw = TARGET_YAW_ANGLES[direction_to_next]
                                 print(f"Current node: {current_node_for_orient}, Next path segment target: {next_node_for_orient}")
                                 print(f"Required turn direction: {direction_to_next}, Target Yaw: {target_yaw * 180/pi:.2f} deg")
-                                orient_robot(target_yaw)
+                                orient_robot(target_yaw) # This function will update last_yaw_update_time
                             print(f"Node Detection & Orientation: Next Node to Target set to {current_target_node}")
                         else:
                             # This means current_path_idx was already the last index, and we just arrived at the final node.
@@ -1214,6 +1224,9 @@ mpu.calibrate_gyro()
 # Set the initial yaw angle to North (pi/2 radians)
 # This assumes the robot is always placed at A1 facing P1 (North).
 yaw_angle = pi / 2
+
+# Initialize the global yaw update timer after calibration and initial angle setting
+last_yaw_update_time = ticks_ms()
 
 # Start the line following loop (robot will start moving after path is calculated and printed)
 run_line_follower()
