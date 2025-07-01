@@ -505,6 +505,22 @@ integral_turn = 0
 # Last time a debug print was made
 last_print_time = 0
 
+# --- NEW FUNCTION FOR STRAIGHT DRIVE ---
+def drive_straight_for_time(speed, duration_seconds):
+    """
+    Drives both motors straight forward at a constant speed for a given duration.
+    This bypasses PID control to ensure straight movement for centering.
+    Args:
+        speed (int): The forward speed (0-1023).
+        duration_seconds (float): The time in seconds to drive.
+    """
+    print(f"Driving straight at {speed} for {duration_seconds} seconds...")
+    set_motor_speed(motor1_pwm, motor1_in2_pin, speed)
+    set_motor_speed(motor2_pwm, motor2_in2_pin, speed)
+    sleep(duration_seconds)
+    stop_motors()
+    print("Straight drive complete.")
+# --- END NEW FUNCTION ---
 
 def orient_robot(target_yaw_radians, spin_in_place=True):
     """
@@ -845,12 +861,9 @@ def run_line_follower():
                         if not reversed_to_node:
                             print("Warning: Did not detect a node while reversing from pickup. Might be off track.")
                         
-                        # Drive forward for a short duration to compensate for sensor placement
+                        # Use the new drive_straight_for_time function for centering
                         print("Driving forward for 1.5 seconds to center on intersection...")
-                        set_motor_speed(motor1_pwm, motor1_in2_pin, BASE_SPEED)
-                        set_motor_speed(motor2_pwm, motor2_in2_pin, BASE_SPEED)
-                        sleep(1.5) # Adjusted duration to 1.5 seconds
-                        stop_motors()
+                        drive_straight_for_time(BASE_SPEED, 1.5)
                         print("Centered on intersection.")
 
                         # Reset PID for forward line following after stopping at node
@@ -928,10 +941,8 @@ def run_line_follower():
                         
                         # Drive forward for 1 second to clear the node (important for small bots)
                         print("Driving forward for 1 second to clear node with wheels...")
-                        set_motor_speed(motor1_pwm, motor1_in2_pin, BASE_SPEED)
-                        set_motor_speed(motor2_pwm, motor2_in2_pin, BASE_SPEED)
-                        sleep(1) # Drive forward for 1 second
-                        stop_motors() # Stop after driving forward
+                        drive_straight_for_time(BASE_SPEED, 1.0) # Use the new function here
+                        print("Cleared node.")
 
                         last_node_detection_time = current_loop_time # Update last detection time
                         last_loop_time = ticks_ms() # Reset loop time after this pause
@@ -1023,12 +1034,9 @@ def run_line_follower():
                                 if not reversed_to_node_delivery:
                                     print("Warning: Did not detect a node while reversing from delivery. Might be off track.")
                                 
-                                # Drive forward for a short duration to compensate for sensor placement
+                                # Use the new drive_straight_for_time function for centering
                                 print("Driving forward for 1.5 seconds to center on intersection (delivery)...")
-                                set_motor_speed(motor1_pwm, motor1_in2_pin, BASE_SPEED)
-                                set_motor_speed(motor2_pwm, motor2_in2_pin, BASE_SPEED)
-                                sleep(1.5) # Adjusted duration to 1.5 second
-                                stop_motors()
+                                drive_straight_for_time(BASE_SPEED, 1.5)
                                 print("Centered on intersection (delivery).")
 
                                 # Reset PID for forward line following after stopping at node
@@ -1209,4 +1217,3 @@ yaw_angle = pi / 2
 
 # Start the line following loop (robot will start moving after path is calculated and printed)
 run_line_follower()
-
