@@ -234,7 +234,7 @@ NODE_SENSOR_THRESHOLD = 3
 # Time to stop at a node (in ms)
 NODE_STOP_TIME_MS = 500
 # Cooldown period for node detection (in ms)
-NODE_DETECTION_COOLDOWN_MS = 2000 # 2 seconds
+NODE_DETECTION_COOLDOWN_MS = 2500 # Increased to 2.5 seconds for better stability
 
 # ----- Obstacle Detection Parameters ---
 OBSTACLE_DISTANCE_CM = 10 # Distance threshold for obstacle detection in cm
@@ -245,12 +245,12 @@ PRINT_INTERVAL_MS = 200 # Print debug info every 200 milliseconds
 
 # --- Global Timings for Driving After Nodes/Maneuvers ---
 # Duration to drive forward after detecting a general node to clear it with wheels
-NODE_CLEAR_DRIVE_TIME_SEC = 1.5
+NODE_CLEAR_DRIVE_TIME_SEC = 1.5 # Increased for better centering
 # Duration to drive forward after reversing from a pickup P-node to center on intersection
 PICKUP_REVERSE_CENTER_DRIVE_TIME_SEC = 1.5
 # Duration to drive forward after reversing from an obstacle to center on intersection
 OBSTACLE_REVERSE_CENTER_DRIVE_TIME_SEC = 1.5
-# Fixed duration to drive into a delivery P-node
+# Fixed duration to drive into a delivery P-node (also used for pickup P-node entry)
 DELIVERY_DRIVE_INTO_PNODE_TIME_SEC = 1.0
 # Fixed duration to drive from the node before a delivery junction to the junction itself
 DELIVERY_JUNCTION_CENTER_DRIVE_TIME_SEC = 0 # New constant for precise centering
@@ -261,10 +261,10 @@ DELIVERY_REVERSE_FORWARD_CENTER_DRIVE_TIME_SEC = 1.5
 # ----- Path Planning Grid (Corrected and Weighted) -----
 corrected_weighted_grid = {
     # Parking spots (P nodes)
-    "P1": {"S": ("A1", 2.0)},
-    "P2": {"S": ("A2", 2.0)},
-    "P3": {"S": ("A3", 2.0)},
-    "P4": {"S": ("A4", 2.0)},
+    "P1": {"S": ("A1", 2.0)}, # P1 connects to A1
+    "P2": {"S": ("A2", 2.0)}, # P2 connects to A2
+    "P3": {"S": ("A3", 2.0)}, # P3 connects to A3
+    "P4": {"S": ("A4", 2.0)}, # P4 connects to A4
     "P5": {"N": ("E3", 2.0)},
     "P6": {"N": ("E4", 2.0)},
     "P7": {"N": ("E5", 2.0)},
@@ -436,7 +436,6 @@ def block_path_segment_by_weight(node1, node2, grid, new_weight=1000.0):
             break
     
     # Block path from node2 to node1 (for bidirectional segments)
-    # Corrected: iterate over grid[node2] not grid[2]
     if node2 in grid: 
         for direction, info in grid[node2].items():
             if info and info[0] == node1:
@@ -524,6 +523,9 @@ current_target_node = "" # The node the robot is currently heading towards in it
 
 # NEW GLOBAL: Robot's current cardinal orientation (e.g., 'N', 'E', 'S', 'W')
 current_robot_orientation = 'N' # Initial assumption: Robot starts facing North at A1.
+
+# NEW GLOBAL: The node the robot is currently logically located at and centered on.
+current_logical_node = "A1" # Initial assumption: Robot starts at A1.
 
 # Global variables for PID line following
 last_error_lf = 0
@@ -660,7 +662,7 @@ def run_line_follower():
            calculated_path, current_mission_idx, current_mission_state, \
            current_pickup_node, current_delivery_node, current_target_node, \
            last_error_lf, integral_lf, last_print_time, current_robot_orientation, \
-           obstacle_readings_count # Add new global for debouncing
+           obstacle_readings_count, current_logical_node
 
     # Define weights locally within the function to ensure scope
     weights = [-2, -1, 0, 1, 2] # Weights for error calculation. Assumes sensors are arranged Left-most to Right-most physically.
@@ -670,36 +672,31 @@ def run_line_follower():
         current_pickup_node, current_delivery_node = MISSION_PLAN[current_mission_idx]
         print(f"\nStarting mission: Pick up from {current_pickup_node}")
         
-        # Initial path calculation: From A1 to P1. The bot starts at A1 facing P1.
-        # This implies the first segment is A1 -> P1.
-        calculated_path = find_path_dijkstra("A1", current_pickup_node, corrected_weighted_grid) 
+        # Initial path calculation: From current_logical_node to first pickup.
+        calculated_path = find_path_dijkstra(current_logical_node, current_pickup_node, corrected_weighted_grid) 
         print(f"Initial path to pickup {current_pickup_node}: {calculated_path}")
         if calculated_path:
-            # Robot is at calculated_path[0]. Its first target is calculated_path[1].
+            # Robot is at calculated_path[0] (which is current_logical_node).
+            # Its first target is calculated_path[1].
             if len(calculated_path) > 1:
-                current_path_idx = 1 # Index of the first actual target node in the path
+                current_path_idx = 1 # Index of the first actual target node in the path (the node it needs to drive TO)
                 current_target_node = calculated_path[current_path_idx] 
                 
-                # Determine initial orientation change
-                initial_start_node = calculated_path[0]
-                initial_next_node = calculated_path[1]
-                direction_to_next = get_direction_between_nodes(initial_start_node, initial_next_node, corrected_weighted_grid)
+                # Determine initial orientation change to move from current_logical_node to current_target_node
+                node_for_initial_orient = current_logical_node # This is A1
+                next_node_for_initial_orient = current_target_node # This is the first step, e.g., C1 if A1->C1 is path
+
+                direction_to_next = get_direction_between_nodes(node_for_initial_orient, next_node_for_initial_orient, corrected_weighted_grid)
                 
-                # The robot *starts* at A1 and we assume it's initially facing North ('N') towards P1.
-                # If its first path segment is A1 to C1 (South), it needs to turn 180.
-                # If A1 to A2 (East), it needs to turn -90.
-                # So the initial orientation needs to align with the first segment.
-                
-                # Set initial cardinal orientation based on first movement
                 if direction_to_next:
-                    # Calculate the relative turn needed from our assumed 'North' start
-                    # to align with the first segment.
                     relative_turn = calculate_relative_turn_angle(current_robot_orientation, direction_to_next)
-                    print(f"Initial turn to align with path from {initial_start_node} to {initial_next_node} ({direction_to_next}). Relative Turn: {relative_turn * 180/pi:.2f} deg")
+                    print(f"Initial turn to align with path from {node_for_initial_orient} to {next_node_for_initial_orient} ({direction_to_next}). Relative Turn: {relative_turn * 180/pi:.2f} deg")
                     if abs(relative_turn) > 0.01: # Only turn if significantly different
                         orient_robot(relative_turn) # This updates current_robot_orientation
+                        # Reset node detection cooldown after a significant turn
+                        last_node_detection_time = ticks_ms()
                 else:
-                    print(f"Warning: Could not determine initial direction from {initial_start_node} to {initial_next_node}.")
+                    print(f"Warning: Could not determine initial direction from {node_for_initial_orient} to {next_node_for_initial_orient}.")
 
             else: # Path is just one node (e.g., if A1 is pickup node and robot is already there)
                 current_path_idx = 0 # No movement needed, already at target
@@ -721,17 +718,13 @@ def run_line_follower():
 
     try:
         while True:
-            # --- START: Define current_time at the beginning of the loop ---
             current_time = ticks_ms()
-            # --- END: Define current_time ---
 
-            # Initialize speeds, error, and correction for printing, default to 0
             left_speed = 0
             right_speed = 0
             error = 'N/A'
             correction = 'N/A'
 
-            # Calculate dt for the current line follower PID iteration
             current_loop_time_lf_pid = ticks_ms()
             dt_loop_lf = (current_loop_time_lf_pid - last_loop_time_lf_pid) / 1000.0 # Time in seconds for PID
             last_loop_time_lf_pid = current_loop_time_lf_pid # Update for the next iteration
@@ -756,28 +749,12 @@ def run_line_follower():
                     if not obstacle_detected_flag: # Obstacle just confirmed
                         obstacle_detected_flag = True
                         stop_motors() # Ensure motors are stopped before turning
-                        print("\n!!! OBSTACLE DETECTED! Reversing to last node and recalculating path. !!!")
+                        print("\n!!! OBSTACLE DETECTED! Reversing to last *confirmed* node and recalculating path. !!!")
 
-                        # Determine the segment that is blocked by the obstacle
-                        if current_path_idx < len(calculated_path):
-                            # The robot is currently trying to reach calculated_path[current_path_idx].
-                            # The segment before it is the one just traversed or the current start.
-                            if current_path_idx == 0:
-                                blocked_segment_start_node = calculated_path[0] # Assuming this is the 'from' node for the first segment
-                                if len(calculated_path) > 1:
-                                    blocked_segment_end_node = calculated_path[1]
-                                else: 
-                                    print("Warning: Path is too short to determine a blocked segment for obstacle.")
-                                    blocked_segment_start_node = None
-                                    blocked_segment_end_node = None
-                            else:
-                                blocked_segment_start_node = calculated_path[current_path_idx - 1]
-                                blocked_segment_end_node = calculated_path[current_path_idx]
-                        else: # Robot is at or past the goal
-                            print("Warning: Obstacle detected but robot is at or beyond goal node's index. Cannot block a specific segment.")
-                            stop_motors()
-                            sleep(5)
-                            return # Exit to avoid errors or endless loop
+                        # The robot is currently somewhere between `current_logical_node` and `current_target_node`.
+                        # It needs to reverse back to `current_logical_node`.
+                        blocked_segment_start_node = current_logical_node
+                        blocked_segment_end_node = current_target_node # The node it was trying to reach
 
                         if blocked_segment_start_node and blocked_segment_end_node:
                             # Increase the weight of the path segment to effectively block it
@@ -786,8 +763,7 @@ def run_line_follower():
                         else:
                             print("Warning: Could not determine valid segment to block due to path length or index issues. Proceeding with recalculation anyway.")
                             
-                        # --- NEW: Reverse to the last node instead of 180-degree turn ---
-                        print("Driving backward, line following to the last traversed node...")
+                        print("Driving backward, line following to the last *confirmed* node...")
                         start_reverse_time_obstacle = ticks_ms()
                         reversed_to_node_obstacle = False
                         
@@ -795,7 +771,7 @@ def run_line_follower():
                         temp_integral_lf_obs = 0
                         temp_last_loop_time_lf_obs = ticks_ms() 
 
-                        while ticks_diff(ticks_ms(), start_reverse_time_obstacle) < 3000: # Max 3 seconds reverse
+                        while ticks_diff(ticks_ms(), start_reverse_time_obstacle) < 10000: # Max 3 seconds reverse
                             current_time_loop_rev_obs = ticks_ms()
                             dt_loop_rev_obs = (current_time_loop_rev_obs - temp_last_loop_time_lf_obs) / 1000.0 
                             temp_last_loop_time_lf_obs = current_time_loop_rev_obs 
@@ -834,54 +810,36 @@ def run_line_follower():
                                 temp_last_error_lf_obs = 0
                             
                             if is_node_detected_robust(ir_values_reverse_obs, num_active_sensors_reverse_obs):
-                                print("Backed up onto a node. Stopping reverse line following from obstacle.")
+                                print(f"Backed up onto a node (assumed {current_logical_node}). Stopping reverse line following from obstacle.")
                                 reversed_to_node_obstacle = True
                                 break
                             sleep_ms(5)
                         stop_motors()
                         if not reversed_to_node_obstacle:
-                            print("Warning: Did not detect a node while reversing from obstacle. Might be off track.")
+                            print("Warning: Did not detect a node while reversing from obstacle. Robot might not be at expected node.")
                         
-                        print(f"Driving forward for {OBSTACLE_REVERSE_CENTER_DRIVE_TIME_SEC} seconds to center on intersection...")
+                        # After reversing, the robot should be centered at current_logical_node.
+                        # Drive forward for centering, if needed, after reverse.
+                        print(f"Driving forward for {OBSTACLE_REVERSE_CENTER_DRIVE_TIME_SEC} seconds to center on {current_logical_node}...")
                         drive_straight_for_time(BASE_SPEED, OBSTACLE_REVERSE_CENTER_DRIVE_TIME_SEC)
-                        print("Centered on intersection.")
+                        print(f"Centered on {current_logical_node}.")
 
                         # Reset global PID state after temporary segment
                         last_error_lf = 0
                         integral_lf = 0
                         last_loop_time_lf_pid = ticks_ms() 
+                        last_node_detection_time = ticks_ms() # Reset cooldown after obstacle maneuver
 
-                        # Update robot's orientation after backing out.
-                        # The robot reversed from `blocked_segment_end_node` to `blocked_segment_start_node`.
-                        # Its new orientation is the direction from `blocked_segment_end_node` to `blocked_segment_start_node`.
-                        # IMPORTANT FIX: When reversing, the robot's physical orientation (the direction its front is pointing)
-                        # does NOT change. It simply moves backward along the line.
-                        # So, we should NOT update current_robot_orientation here based on the reverse path.
-                        # It should retain its orientation from before the reverse.
-                        # The subsequent orient_robot call will handle the turn to the new path segment.
-                        # if blocked_segment_start_node and blocked_segment_end_node:
-                        #     new_orientation_after_reverse = get_direction_between_nodes(blocked_segment_end_node, blocked_segment_start_node, corrected_weighted_grid)
-                        #     if new_orientation_after_reverse:
-                        #         current_robot_orientation = new_orientation_after_reverse
-                        #         print(f"After reversing from obstacle, robot is at {blocked_segment_start_node}, facing {current_robot_orientation}.")
-                        #     else:
-                        #         print(f"Warning: Could not determine orientation after reversing from obstacle.")
-                        # else:
-                        #     print("Warning: Blocked segment nodes not defined, cannot determine orientation after reversal.")
-                        print(f"After reversing from obstacle, robot is at {blocked_segment_start_node}, maintaining previous orientation {current_robot_orientation}.")
+                        # The robot's logical position is confirmed as current_logical_node.
+                        # Its physical orientation has not changed.
 
-
-                        # Recalculate path from the last successfully reached node to the goal.
-                        # This is now `blocked_segment_start_node`.
-                        current_robot_node_for_recalc = blocked_segment_start_node
-                        
-                        # Recalculate the path to the current mission target
+                        # Recalculate path from current_logical_node to the mission target.
                         if current_mission_state == MISSION_STATE_PICKUP:
                             target_goal_node = current_pickup_node
                         else: # MISSION_STATE_DELIVER
                             target_goal_node = current_delivery_node
 
-                        new_calculated_path = find_path_dijkstra(current_robot_node_for_recalc, target_goal_node, corrected_weighted_grid)
+                        new_calculated_path = find_path_dijkstra(current_logical_node, target_goal_node, corrected_weighted_grid)
                         
                         if not new_calculated_path:
                             print("CRITICAL ERROR: No alternative path found after obstacle. Stopping.")
@@ -892,14 +850,13 @@ def run_line_follower():
                             calculated_path = new_calculated_path
                             
                             if len(calculated_path) > 1:
-                                current_path_idx = 1 # Index of the first actual target node in the new path
+                                current_path_idx = 1 # First step is to the second node in the new path
                                 current_target_node = calculated_path[current_path_idx]
                                 
                                 # Orient robot towards the next target in the new path
-                                node_at_recalc = calculated_path[0] # This is where the robot is after reversing
-                                next_node_in_path = calculated_path[1]
+                                node_at_recalc = current_logical_node # This is current_logical_node
+                                next_node_in_path = current_target_node
 
-                                # Determine the desired cardinal orientation for the next segment
                                 desired_orientation_to_next = get_direction_between_nodes(node_at_recalc, next_node_in_path, corrected_weighted_grid)
                                 
                                 if desired_orientation_to_next:
@@ -907,6 +864,8 @@ def run_line_follower():
                                     print(f"Orienting from {node_at_recalc} towards {next_node_in_path} ({desired_orientation_to_next}). Relative Turn: {relative_turn * 180/pi:.2f} deg")
                                     if abs(relative_turn) > 0.01: # Only turn if significantly different
                                         orient_robot(relative_turn) # This updates current_robot_orientation
+                                        # Reset node detection cooldown after a significant turn
+                                        last_node_detection_time = ticks_ms()
                                 else:
                                     print(f"Warning: Could not determine direction for orientation from {node_at_recalc} to {next_node_in_path} after obstacle.")
                                 
@@ -928,8 +887,11 @@ def run_line_follower():
                 button_pressed = button.value() == 0
                 
                 # --- Button Pressed Logic for Pickup ---
+                # This block is entered when the button is pressed AND the robot is in PICKUP state.
+                # The robot should be physically at the P-node (e.g., P1) when the button is pressed.
                 if button_pressed and current_mission_state == MISSION_STATE_PICKUP:
-                    if calculated_path and current_path_idx < len(calculated_path) and calculated_path[current_path_idx] == current_pickup_node:
+                    # Confirm robot is at the designated pickup P-node (e.g., P1)
+                    if current_logical_node == current_pickup_node: 
                         print(f"Confirmed at pickup node {current_pickup_node}. Activating electromagnet, picking up box.")
                         electromagnet.on()  # Turn electromagnet ON
                         stop_motors()       # Stop the robot
@@ -938,11 +900,23 @@ def run_line_follower():
                         current_mission_state = MISSION_STATE_DELIVER
                         print(f"Box picked up. Now moving to deliver to {current_delivery_node}.")
                         
-                        print("Driving backward, line following to detect connecting node from P-node...")
+                        # After picking up from P-node, robot needs to reverse back to the connecting A-node.
+                        # Find the A-node connected to the current P-node (e.g., A1 for P1)
+                        connecting_a_node = None
+                        for direction, info in corrected_weighted_grid[current_pickup_node].items():
+                            if info and info[0].startswith('A'): # Assuming A-nodes are the only ones connected to P-nodes
+                                connecting_a_node = info[0]
+                                break
+
+                        if not connecting_a_node:
+                            print(f"ERROR: Could not find connecting A-node for P-node {current_pickup_node}. Cannot reverse. Stopping.")
+                            stop_motors()
+                            return
+
+                        print(f"Driving backward, line following to return to {connecting_a_node}...")
                         start_reverse_time = ticks_ms()
                         reversed_to_node = False
                         
-                        # Localize PID state for this temporary reverse segment
                         temp_last_error_lf = 0
                         temp_integral_lf = 0
                         temp_last_loop_time_lf_pid = ticks_ms() 
@@ -952,7 +926,6 @@ def run_line_follower():
                             dt_loop_rev = (current_time_loop_rev - temp_last_loop_time_lf_pid) / 1000.0 
                             temp_last_loop_time_lf_pid = current_time_loop_rev 
 
-                            # Ensure dt is not zero
                             if dt_loop_rev <= 0: 
                                 sleep_ms(1)
                                 continue
@@ -960,6 +933,11 @@ def run_line_follower():
                             ir_values_reverse = [pin.value() for pin in ir_pins]
                             num_active_sensors_reverse = sum(1 for val in ir_values_reverse if val == 0)
 
+                            if is_node_detected_robust(ir_values_reverse, num_active_sensors_reverse):
+                                print(f"Backed up onto node (assumed {connecting_a_node}). Stopping reverse line following.")
+                                reversed_to_node = True
+                                break
+                            
                             if num_active_sensors_reverse > 0:
                                 weighted_sum_reverse = sum(weights[i] for i, val in enumerate(ir_values_reverse) if val == 0)
                                 current_error_reverse = weighted_sum_reverse 
@@ -985,83 +963,62 @@ def run_line_follower():
                                 set_motor_speed(motor2_pwm, motor2_in2_pin, -REVERSE_SPEED)
                                 temp_integral_lf = 0
                                 temp_last_error_lf = 0
-                            
-                            if is_node_detected_robust(ir_values_reverse, num_active_sensors_reverse):
-                                print("Backed up onto a node. Stopping reverse line following.")
-                                reversed_to_node = True
-                                break
                             sleep_ms(5)
                         stop_motors()
                         if not reversed_to_node:
                             print("Warning: Did not detect a node while reversing from pickup. Might be off track.")
                         
-                        print(f"Driving forward for {PICKUP_REVERSE_CENTER_DRIVE_TIME_SEC} seconds to center on intersection...")
-                        drive_straight_for_time(BASE_SPEED, PICKUP_REVERSE_CENTER_DRIVE_TIME_SEC)
-                        print("Centered on intersection.")
-
                         # Reset global PID state after temporary segment
                         last_error_lf = 0
                         integral_lf = 0
                         last_loop_time_lf_pid = ticks_ms() 
+                        last_node_detection_time = ticks_ms() # Reset cooldown after pickup maneuver
 
-                        # The robot is now logically at the node from which it entered the P-node dead-end.
-                        # We need to determine this entry node and its orientation.
-                        # The robot will have reversed, so its current orientation is the *opposite* of
-                        # the direction it took to enter the P-node.
-                        node_robot_is_at_after_reverse = ""
-                        direction_entered_p_node_from = None
-                        
-                        # Find which node connects to current_pickup_node from the main grid
-                        for direction, info in corrected_weighted_grid[current_pickup_node].items():
-                            if info and info[0] in corrected_weighted_grid:
-                                node_robot_is_at_after_reverse = info[0]
-                                direction_entered_p_node_from = direction # e.g., if P1 has 'S' to A1, means robot entered from South
-                                break
+                        # After reversing, the robot is now logically at the connecting A-node.
+                        current_logical_node = connecting_a_node
+                        print(f"After reversing from {current_pickup_node}, robot is now logically at {current_logical_node}.")
 
-                        if node_robot_is_at_after_reverse:
-                            # IMPORTANT FIX: When reversing from a P-node, the robot's physical orientation
-                            # does NOT change. It simply moves backward.
-                            # So, we should NOT update current_robot_orientation to the opposite direction.
-                            # current_robot_orientation = get_opposite_direction(direction_entered_p_node_from)
-                            print(f"After reversing from {current_pickup_node}, robot is at {node_robot_is_at_after_reverse}, maintaining previous orientation {current_robot_orientation}.")
+                        print(f"Driving forward for {PICKUP_REVERSE_CENTER_DRIVE_TIME_SEC} seconds to center on {current_logical_node}...")
+                        drive_straight_for_time(BASE_SPEED, PICKUP_REVERSE_CENTER_DRIVE_TIME_SEC)
+                        print(f"Centered on {current_logical_node}.")
 
-                            # Recalculate path from this entry node to the delivery node
-                            calculated_path = find_path_dijkstra(node_robot_is_at_after_reverse, current_delivery_node, corrected_weighted_grid)
-                            if calculated_path:
-                                if len(calculated_path) > 1:
-                                    current_path_idx = 1 
-                                    current_target_node = calculated_path[current_path_idx]
-                                    
-                                    node_for_orient = calculated_path[0] # This is `node_robot_is_at_after_reverse`
-                                    next_node_for_orient = calculated_path[1]
-                                    
-                                    desired_orientation_for_segment = get_direction_between_nodes(node_for_orient, next_node_for_orient, corrected_weighted_grid)
-                                    
-                                    if desired_orientation_for_segment:
-                                        relative_turn = calculate_relative_turn_angle(current_robot_orientation, desired_orientation_for_segment)
-                                        print(f"Orienting from {node_for_orient} towards {next_node_for_orient} ({desired_orientation_for_segment}). Relative Turn: {relative_turn * 180/pi:.2f} deg")
-                                        if abs(relative_turn) > 0.01: # Only turn if significantly different
-                                            orient_robot(relative_turn) # This updates current_robot_orientation
-                                    print(f"Pickup Path Recalculation: Next Node to Target set to {current_target_node}") 
-                                else:
-                                    current_path_idx = 0 
-                                    current_target_node = calculated_path[0]
-                                    print(f"Path to {current_delivery_node} is just one node. No immediate turn needed.")
-                                    print(f"Pickup Path Recalculation: Next Node to Target set to {current_target_node}") 
-
-                                print(f"Path to delivery {current_delivery_node}: {calculated_path}")
-
+                        # Recalculate path from this current_logical_node (e.g., A1) to the delivery node (e.g., P5)
+                        calculated_path = find_path_dijkstra(current_logical_node, current_delivery_node, corrected_weighted_grid)
+                        if calculated_path:
+                            if len(calculated_path) > 1:
+                                current_path_idx = 1 
+                                current_target_node = calculated_path[current_path_idx]
+                                
+                                node_for_orient = calculated_path[0] # This is current_logical_node (e.g., A1)
+                                next_node_for_orient = calculated_path[1] # This is the next node in path to P5 (e.g., C1)
+                                
+                                desired_orientation_for_segment = get_direction_between_nodes(node_for_orient, next_node_for_orient, corrected_weighted_grid)
+                                
+                                if desired_orientation_for_segment:
+                                    relative_turn = calculate_relative_turn_angle(current_robot_orientation, desired_orientation_for_segment)
+                                    print(f"Orienting from {node_for_orient} towards {next_node_for_orient} ({desired_orientation_for_segment}). Relative Turn: {relative_turn * 180/pi:.2f} deg")
+                                    if abs(relative_turn) > 0.01: # Only turn if significantly different
+                                        orient_robot(relative_turn) # This updates current_robot_orientation
+                                        # Reset node detection cooldown after a significant turn
+                                        last_node_detection_time = ticks_ms()
+                                print(f"Pickup Path Recalculation: Next Node to Target set to {current_target_node}") 
                             else:
-                                print(f"ERROR: No path found from {node_robot_is_at_after_reverse} to {current_delivery_node}. Stopping.")
-                                stop_motors()
-                                return 
+                                current_path_idx = 0 
+                                current_target_node = calculated_path[0]
+                                print(f"Path to {current_delivery_node} is just one node. No immediate turn needed.")
+                                print(f"Pickup Path Recalculation: Next Node to Target set to {current_target_node}") 
+
+                            print(f"Path to delivery {current_delivery_node}: {calculated_path}")
+
                         else:
-                            print(f"ERROR: Could not determine entry node for {current_pickup_node}. Stopping.")
+                            print(f"ERROR: No path found from {current_logical_node} to {current_delivery_node}. Stopping.")
                             stop_motors()
-                            return
+                            return 
+                        
+                        continue # Restart the main while loop to start moving towards delivery
 
                     else:
-                        print(f"Button pressed, but not at the designated pickup node ({current_pickup_node}). Ignoring.")
+                        print(f"Button pressed, but not at the designated pickup node ({current_pickup_node}). Current Logical Node: {current_logical_node}. Ignoring.")
 
                 ir_values = [pin.value() for pin in ir_pins] 
                 
@@ -1077,83 +1034,112 @@ def run_line_follower():
                 # --- Node Detection Logic with Cooldown ---
                 if is_node_detected_robust(ir_values, num_active_sensors):
                     if (current_time - last_node_detection_time) >= NODE_DETECTION_COOLDOWN_MS:
-                        # The robot has just arrived at a node.
-                        # node_just_arrived_at will be the node the robot is currently physically at.
-                        # This node is the one *before* current_target_node in the path.
-                        node_just_arrived_at = calculated_path[current_path_idx - 1] if current_path_idx > 0 else calculated_path[0]
-                        
                         stop_motors()
-                        print(f"\n*** NODE DETECTED! Arrived at {node_just_arrived_at}. Stopping briefly. ***")
+                        print(f"\n*** INTERMEDIATE NODE DETECTED! Stopping briefly. ***")
                         sleep_ms(NODE_STOP_TIME_MS)
                         
-                        print(f"Driving forward for {NODE_CLEAR_DRIVE_TIME_SEC} second to clear node with wheels...")
+                        # After detection, drive *through* the node to center on it.
+                        print(f"Driving forward for {NODE_CLEAR_DRIVE_TIME_SEC} second to clear node and center...")
                         drive_straight_for_time(BASE_SPEED, NODE_CLEAR_DRIVE_TIME_SEC) # Robot is now past Node_X, centered.
 
-                        last_node_detection_time = current_time
+                        last_node_detection_time = current_time # Reset cooldown after passing through node
                         last_loop_time_lf_pid = ticks_ms() 
                         last_error_lf = 0
                         integral_lf = 0
 
-                        # Check if the next node in the path is the final pickup node
-                        if current_mission_state == MISSION_STATE_PICKUP and \
-                           current_path_idx < len(calculated_path) and \
-                           calculated_path[current_path_idx] == current_pickup_node:
-                            
-                            print(f"Arrived at pickup node {current_pickup_node}. Waiting for button press to pick up.")
-                            # The current_path_idx already points to the pickup node, so no increment.
-                            stop_motors() # Ensure it stays stopped
-                            continue # Go back to main loop, waiting for button
+                        # CRITICAL UPDATE: The robot has now physically arrived at and centered on the node
+                        # that was previously its `current_target_node`.
+                        # So, update `current_logical_node` to reflect this.
+                        # First, ensure current_path_idx is valid before accessing calculated_path.
+                        if current_path_idx < len(calculated_path):
+                            current_logical_node = calculated_path[current_path_idx]
+                            print(f"Robot is now logically at {current_logical_node}.")
+                        else:
+                            print("Warning: Node detected but current_path_idx is out of bounds. Robot might be at final destination.")
+                            # If it's out of bounds, it means it just reached the last node.
+                            current_logical_node = calculated_path[-1] # Assume it's at the last node
+                            print(f"Assuming robot is at final node: {current_logical_node}")
+                            stop_motors()
+                            continue # Remain stopped, waiting for mission completion or button press
 
-                        # Check if the *next* node in the path is the delivery P-node.
-                        # This means we just arrived at the node *before* the delivery P-node.
-                        # `node_just_arrived_at` is the node we just arrived at (e.g., E2).
-                        # `calculated_path[current_path_idx]` is the junction node (e.g., E3).
-                        # `current_delivery_node` is the final P-node (e.g., P5).
+                        # --- Handle different types of nodes after centering ---
+
+                        # Case 1: Arrived at a junction node *before* the pickup P-node.
+                        # This means current_logical_node is the junction (e.g., A1), and the *next* node in the path is the pickup P-node (e.g., P1).
+                        if current_mission_state == MISSION_STATE_PICKUP and \
+                           (current_path_idx + 1) < len(calculated_path) and \
+                           calculated_path[current_path_idx + 1] == current_pickup_node:
+                            
+                            # Robot is currently centered at `current_logical_node` (junction, e.g., A1).
+                            # The next node in the path is `current_pickup_node` (P-node, e.g., P1).
+                            junction_node = current_logical_node 
+                            pickup_p_node_target = current_pickup_node 
+
+                            print(f"*** At junction {junction_node}. Now orienting and driving into pickup node {pickup_p_node_target}. ***")
+                            
+                            # First, advance current_path_idx to point to the pickup P-node.
+                            current_path_idx += 1
+                            current_target_node = calculated_path[current_path_idx] # This is now the P-node
+
+                            # Determine the desired orientation to enter the P-node from the junction node
+                            desired_orientation_to_p_node = get_direction_between_nodes(junction_node, pickup_p_node_target, corrected_weighted_grid)
+                            
+                            pickup_drive_duration = DELIVERY_DRIVE_INTO_PNODE_TIME_SEC # Reusing this constant for pickup entry
+                            if desired_orientation_to_p_node:
+                                relative_turn = calculate_relative_turn_angle(current_robot_orientation, desired_orientation_to_p_node)
+                                print(f"Orienting from {junction_node} towards {pickup_p_node_target} ({desired_orientation_to_p_node}). Relative Turn: {relative_turn * 180/pi:.2f} deg")
+                                if abs(relative_turn) > 0.01: # Only turn if significantly different
+                                    orient_robot(relative_turn) # This updates current_robot_orientation
+                                    # Reset node detection cooldown after a significant turn
+                                    last_node_detection_time = ticks_ms()
+                                
+                                print(f"Using fixed pickup drive duration: {pickup_drive_duration} seconds.")
+                            else:
+                                print(f"CRITICAL WARNING: Could not determine direction for orientation from {junction_node} to {pickup_p_node_target}. Using default duration. This indicates a map error or logic flaw.")
+
+                            print(f"Driving forward for {pickup_drive_duration} seconds to position for pickup...")
+                            drive_straight_for_time(BASE_SPEED, pickup_drive_duration)
+                            
+                            # After driving into P-node, update current_logical_node to the P-node.
+                            current_logical_node = pickup_p_node_target
+                            print(f"Robot is now logically at pickup P-node: {current_logical_node}.")
+                            
+                            # Now, the robot is at the P-node and waiting for the button press.
+                            continue # Go back to main loop, button logic will handle it.
+
+
+                        # Case 2: Arrived at a junction node *before* the delivery P-node.
+                        # This means current_logical_node is the junction, and the *next* node in the path is the delivery P-node.
                         elif current_mission_state == MISSION_STATE_DELIVER and \
                              (current_path_idx + 1) < len(calculated_path) and \
                              calculated_path[current_path_idx + 1] == current_delivery_node:
                             
-                            # First, drive from `node_just_arrived_at` (e.g., E2) to the junction node (e.g., E3).
-                            junction_node = calculated_path[current_path_idx]
-                            print(f"Driving from {node_just_arrived_at} to junction node {junction_node} before final delivery to {current_delivery_node}...")
-                            
-                            # Determine direction and duration to drive to the junction node
-                            direction_to_junction = get_direction_between_nodes(node_just_arrived_at, junction_node, corrected_weighted_grid)
-                            
-                            # Use the new precise constant for driving into the delivery junction
-                            drive_to_junction_duration = DELIVERY_JUNCTION_CENTER_DRIVE_TIME_SEC 
-                            if direction_to_junction:
-                                # Orient towards the junction if necessary
-                                relative_turn_to_junction = calculate_relative_turn_angle(current_robot_orientation, direction_to_junction)
-                                if abs(relative_turn_to_junction) > 0.01:
-                                    orient_robot(relative_turn_to_junction)
-                            else:
-                                print(f"Warning: Could not determine direction from {node_just_arrived_at} to junction {junction_node}. Using default drive time.")
-                                # drive_to_junction_duration is already set to DELIVERY_JUNCTION_CENTER_DRIVE_TIME_SEC
+                            # Robot is currently centered at `current_logical_node` (which is the junction node, e.g., E3).
+                            # The next node in the path is `current_delivery_node` (e.g., P5).
+                            junction_node = current_logical_node # For clarity
+                            delivery_p_node_target = current_delivery_node # For clarity
 
-                            drive_straight_for_time(BASE_SPEED, drive_to_junction_duration)
+                            print(f"*** At junction {junction_node}. Now orienting and driving into delivery node {delivery_p_node_target}. ***")
                             
-                            # Now the robot is physically at the `junction_node` (e.g., E3).
-                            # Update `current_path_idx` to point to the delivery P-node for the next step.
+                            # First, advance current_path_idx to point to the delivery P-node.
                             current_path_idx += 1
-                            current_target_node = calculated_path[current_path_idx] # This is the P-node (e.g., P5)
+                            current_target_node = calculated_path[current_path_idx] # This is now the P-node
 
-                            print(f"*** At junction {junction_node}. Now orienting and driving into delivery node {current_target_node}. ***")
-                            
                             # Determine the desired orientation to enter the P-node from the junction node
-                            desired_orientation_to_p_node = get_direction_between_nodes(junction_node, current_target_node, corrected_weighted_grid)
+                            desired_orientation_to_p_node = get_direction_between_nodes(junction_node, delivery_p_node_target, corrected_weighted_grid)
                             
                             delivery_drive_duration = DELIVERY_DRIVE_INTO_PNODE_TIME_SEC 
                             if desired_orientation_to_p_node:
-                                relative_turn_to_p_node = calculate_relative_turn_angle(current_robot_orientation, desired_orientation_to_p_node)
-                                print(f"Orienting from {junction_node} towards {current_target_node} ({desired_orientation_to_p_node}). Relative Turn: {relative_turn_to_p_node * 180/pi:.2f} deg")
-                                if abs(relative_turn_to_p_node) > 0.01: # Only turn if significantly different
-                                    orient_robot(relative_turn_to_p_node) # This updates current_robot_orientation
+                                relative_turn = calculate_relative_turn_angle(current_robot_orientation, desired_orientation_to_p_node)
+                                print(f"Orienting from {junction_node} towards {delivery_p_node_target} ({desired_orientation_to_p_node}). Relative Turn: {relative_turn * 180/pi:.2f} deg")
+                                if abs(relative_turn) > 0.01: # Only turn if significantly different
+                                    orient_robot(relative_turn) # This updates current_robot_orientation
+                                    # Reset node detection cooldown after a significant turn
+                                    last_node_detection_time = ticks_ms()
                                 
                                 print(f"Using fixed delivery drive duration: {delivery_drive_duration} seconds.")
                             else:
-                                print(f"CRITICAL WARNING: Could not determine direction for orientation from {junction_node} to {current_target_node}. Using default duration. This indicates a map error or logic flaw.")
-                                # delivery_drive_duration is already set to DELIVERY_DRIVE_INTO_PNODE_TIME_SEC
+                                print(f"CRITICAL WARNING: Could not determine direction for orientation from {junction_node} to {delivery_p_node_target}. Using default duration. This indicates a map error or logic flaw.")
 
                             print(f"Driving forward for {delivery_drive_duration} seconds to position for delivery...")
                             drive_straight_for_time(BASE_SPEED, delivery_drive_duration)
@@ -1162,6 +1148,10 @@ def run_line_follower():
                             electromagnet.off()
                             sleep(0.5) # Reduced sleep time
                             
+                            # After driving into P-node, update current_logical_node to the P-node.
+                            current_logical_node = delivery_p_node_target
+                            print(f"Robot is now logically at delivery P-node: {current_logical_node}.")
+
                             # Step 3: Drive backward from P-node to the junction node.
                             print(f"Driving backward to return to junction node {junction_node}...")
                             start_reverse_time_delivery = ticks_ms()
@@ -1170,7 +1160,7 @@ def run_line_follower():
                             temp_last_error_lf = 0
                             temp_integral_lf = 0
                             temp_last_loop_time_lf_pid = ticks_ms()
-                            delivery_p_node = current_target_node # Store for clarity
+                            last_node_detection_time = ticks_ms() # Reset cooldown before reverse line following
 
                             while ticks_diff(ticks_ms(), start_reverse_time_delivery) < 3000:
                                 current_time_loop_rev_del = ticks_ms()
@@ -1223,14 +1213,15 @@ def run_line_follower():
                             last_error_lf = 0
                             integral_lf = 0
                             last_loop_time_lf_pid = ticks_ms() 
+                            last_node_detection_time = ticks_ms() # Reset cooldown after reverse maneuver
 
-                            print(f"After reversing from {delivery_p_node}, robot is at {junction_node}, maintaining previous orientation {current_robot_orientation}.")
+                            # After reversing, the robot is now logically at the junction node again.
+                            current_logical_node = junction_node
+                            print(f"After reversing from {delivery_p_node_target}, robot is now logically at {current_logical_node}.")
 
-                            # --- ADDED: Drive forward a little after backing up from delivery ---
                             print(f"Driving forward for {DELIVERY_REVERSE_FORWARD_CENTER_DRIVE_TIME_SEC} seconds to center after delivery reverse...")
                             drive_straight_for_time(BASE_SPEED, DELIVERY_REVERSE_FORWARD_CENTER_DRIVE_TIME_SEC)
                             print("Centered after delivery reverse.")
-                            # --- END ADDED BLOCK ---
 
                             current_mission_idx += 1
                             if current_mission_idx < len(MISSION_PLAN):
@@ -1238,13 +1229,13 @@ def run_line_follower():
                                 current_mission_state = MISSION_STATE_PICKUP 
                                 print(f"Delivery complete. Next mission: Pick up from {current_pickup_node}.")
                                 
-                                # Recalculate path to the next pickup node from the junction node
-                                calculated_path = find_path_dijkstra(junction_node, current_pickup_node, corrected_weighted_grid)
+                                # Recalculate path to the next pickup node from current_logical_node (the junction)
+                                calculated_path = find_path_dijkstra(current_logical_node, current_pickup_node, corrected_weighted_grid)
                                 if calculated_path:
                                     if len(calculated_path) > 1:
                                         current_path_idx = 1 # Start from the first actual target node in the new path
                                         current_target_node = calculated_path[current_path_idx]
-                                        node_for_orient = calculated_path[0] # This is `junction_node`
+                                        node_for_orient = calculated_path[0] # This is current_logical_node
                                         next_node_for_orient = calculated_path[1]
                                         
                                         desired_orientation_for_segment = get_direction_between_nodes(node_for_orient, next_node_for_orient, corrected_weighted_grid)
@@ -1253,6 +1244,8 @@ def run_line_follower():
                                             print(f"Orienting from {node_for_orient} towards {next_node_for_orient} ({desired_orientation_for_segment}). Relative Turn: {relative_turn * 180/pi:.2f} deg")
                                             if abs(relative_turn) > 0.01: # Only turn if significantly different
                                                 orient_robot(relative_turn) # This updates current_robot_orientation
+                                                # Reset node detection cooldown after a significant turn
+                                                last_node_detection_time = ticks_ms()
                                         print(f"Delivery Next Mission Path Recalculation: Next Node to Target set to {current_target_node}")
                                     else:
                                         current_path_idx = 0
@@ -1260,7 +1253,7 @@ def run_line_follower():
                                         print(f"Delivery Next Mission Path Recalculation: Next Node to Target set to {current_target_node} (single node path)")
                                     print(f"Path to next pickup {current_pickup_node}: {calculated_path}")
                                 else:
-                                    print(f"ERROR: No path found from {junction_node} to {current_pickup_node}. Stopping.")
+                                    print(f"ERROR: No path found from {current_logical_node} to {current_pickup_node}. Stopping.")
                                     current_mission_state = MISSION_STATE_COMPLETE
                                     stop_motors()
                                     return
@@ -1272,16 +1265,17 @@ def run_line_follower():
                             
                             continue # Restart the main while loop
                         
-                        # If neither of the above special cases (final pickup or delivery P-node approach)
-                        # then it's a regular intermediate node, so increment path_idx for traversal.
-                        elif current_path_idx + 1 < len(calculated_path): 
-                            current_path_idx += 1
-                            current_target_node = calculated_path[current_path_idx]
+                        # Case 3: Regular Intermediate Node.
+                        # The robot is now logically at `current_logical_node` (which was `calculated_path[current_path_idx]`).
+                        # Now, advance `current_path_idx` to point to the *next* node the robot needs to drive towards.
+                        elif (current_path_idx + 1) < len(calculated_path): 
+                            current_path_idx += 1 # Advance to the *next* node in the path list as the *target*
+                            current_target_node = calculated_path[current_path_idx] # This is the node to drive TO next.
                             
-                            # Determine the direction from the node we just arrived at
-                            # to the next target node in the path.
-                            node_robot_was_at = calculated_path[current_path_idx - 1]
-                            node_robot_is_going_to = calculated_path[current_path_idx]
+                            # Determine the direction from the node we are currently at (`current_logical_node`)
+                            # to the next target node (`current_target_node`).
+                            node_robot_was_at = current_logical_node # This is correct now!
+                            node_robot_is_going_to = current_target_node
 
                             desired_orientation_for_segment = get_direction_between_nodes(node_robot_was_at, node_robot_is_going_to, corrected_weighted_grid)
                             
@@ -1291,19 +1285,26 @@ def run_line_follower():
                                 print(f"Required turn direction: {desired_orientation_for_segment}, Relative Turn: {relative_turn * 180/pi:.2f} deg")
                                 if abs(relative_turn) > 0.01: # Only turn if significantly different
                                     orient_robot(relative_turn) # This updates current_robot_orientation
+                                    # Reset node detection cooldown after a significant turn
+                                    last_node_detection_time = ticks_ms()
                             else:
                                 print(f"Warning: Could not determine direction for orientation from {node_robot_was_at} to {node_robot_is_going_to}.")
                                 
                             print(f"Node Detection & Orientation: Next Node to Target set to {current_target_node}")
                         else:
-                            # This means we arrived at the very last node in the path, and it's not a P-node for delivery.
-                            # This would typically be the final pickup node (handled above) or the very end of the mission path.
-                            print(f"Arrived at final node {node_just_arrived_at} in path. Waiting for next action (e.g., button press for pickup or mission completion).")
+                            # This implies the robot has reached the final destination of the current calculated_path,
+                            # and it's not a P-node handled above. This should typically be the very last node in the mission.
+                            print(f"Arrived at final node {current_logical_node} in path. Waiting for next action or mission completion.")
                             stop_motors() # Stay stopped
-                            continue # Restart main loop to await external trigger (button) or mission end.
+                            # If mission state is still PICKUP, and current_logical_node is the pickup node,
+                            # the button press logic will catch it.
+                            if current_mission_state != MISSION_STATE_COMPLETE:
+                                continue # Keep looping to check for button or other triggers
 
-                # Continue with line following if not at goal, not handling obstacle, and not waiting for button
-                if not button_pressed or not (current_mission_state == MISSION_STATE_PICKUP and calculated_path[current_path_idx] == current_pickup_node):
+                # Continue with line following if not at a special state (obstacle, button wait, node handling)
+                # This condition ensures the robot keeps line following unless it's explicitly stopped for a special event.
+                if not obstacle_detected_flag and \
+                   not (button_pressed and current_mission_state == MISSION_STATE_PICKUP and current_logical_node == current_pickup_node):
                     if num_active_sensors > 0:
                         error = weighted_sum 
 
@@ -1331,7 +1332,7 @@ def run_line_follower():
                     set_motor_speed(motor1_pwm, motor1_in2_pin, left_speed)
                     set_motor_speed(motor2_pwm, motor2_in2_pin, right_speed)
 
-            else:
+            else: # If obstacle detected or waiting for button at pickup node
                 stop_motors()
                 sleep_ms(50) 
 
@@ -1350,15 +1351,16 @@ def run_line_follower():
                 print("Button Pressed:", button_pressed)
                 print("Robot Cardinal Orientation:", current_robot_orientation)
                 print("Obstacle Detected Flag:", obstacle_detected_flag)
-                print("Obstacle Readings Count:", obstacle_readings_count) # Added for debug
+                print("Obstacle Readings Count:", obstacle_readings_count)
                 print("Current Mission Index:", current_mission_idx)
                 print("Current Mission State:", "PICKUP" if current_mission_state == MISSION_STATE_PICKUP else "DELIVER" if current_mission_state == MISSION_STATE_DELIVER else "COMPLETE")
                 print("Current Pickup Node:", current_pickup_node)
                 print("Current Delivery Node:", current_delivery_node)
-                print("Current Node Index in Path:", current_path_idx) 
-                print("Next Node to Target in Path:", current_target_node) 
+                print("Current Logical Node (Robot's Actual Position):", current_logical_node)
+                print("Current Path Index:", current_path_idx) 
+                print("Current Target Node (Driving Towards):", current_target_node)
                 if calculated_path:
-                    print("Current Path:", calculated_path)
+                    print("Full Calculated Path:", calculated_path)
                 last_print_time = current_time_for_print 
 
             sleep_ms(5)
@@ -1384,4 +1386,5 @@ current_robot_orientation = 'N'
 
 # Start the line following loop (robot will start moving after path is calculated and printed)
 run_line_follower()
+
 
