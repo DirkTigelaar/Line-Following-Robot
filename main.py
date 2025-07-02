@@ -244,6 +244,17 @@ OBSTACLE_DEBOUNCE_COUNT = 3 # Number of consecutive readings to confirm an obsta
 # Printing interval for debug information
 PRINT_INTERVAL_MS = 200 # Print debug info every 200 milliseconds
 
+# --- Global Timings for Driving After Nodes/Maneuvers ---
+# Duration to drive forward after detecting a general node to clear it with wheels
+NODE_CLEAR_DRIVE_TIME_SEC = 1.0
+# Duration to drive forward after reversing from a pickup P-node to center on intersection
+PICKUP_REVERSE_CENTER_DRIVE_TIME_SEC = 1.5
+# Duration to drive forward after reversing from an obstacle to center on intersection
+OBSTACLE_REVERSE_CENTER_DRIVE_TIME_SEC = 1.5
+# Fixed duration to drive into a delivery P-node
+DELIVERY_DRIVE_INTO_PNODE_TIME_SEC = 1.0
+
+
 # ----- Path Planning Grid (Corrected and Weighted) -----
 corrected_weighted_grid = {
     # Parking spots (P nodes)
@@ -393,7 +404,6 @@ def calculate_relative_turn_angle(current_orientation_cardinal, desired_orientat
     if current_rad is None or desired_rad is None:
         print(f"Error: Invalid cardinal orientation provided: Current={current_orientation_cardinal}, Desired={desired_orientation_cardinal}")
         return 0.0
-
     # Calculate difference, then normalize to -pi to pi
     diff = desired_rad - current_rad
     return normalize_angle_rad(diff)
@@ -829,8 +839,8 @@ def run_line_follower():
                         if not reversed_to_node_obstacle:
                             print("Warning: Did not detect a node while reversing from obstacle. Might be off track.")
                         
-                        print("Driving forward for 1.5 seconds to center on intersection...")
-                        drive_straight_for_time(BASE_SPEED, 1.5)
+                        print(f"Driving forward for {OBSTACLE_REVERSE_CENTER_DRIVE_TIME_SEC} seconds to center on intersection...")
+                        drive_straight_for_time(BASE_SPEED, OBSTACLE_REVERSE_CENTER_DRIVE_TIME_SEC)
                         print("Centered on intersection.")
 
                         # Reset global PID state after temporary segment
@@ -982,8 +992,8 @@ def run_line_follower():
                         if not reversed_to_node:
                             print("Warning: Did not detect a node while reversing from pickup. Might be off track.")
                         
-                        print("Driving forward for 1.5 seconds to center on intersection...")
-                        drive_straight_for_time(BASE_SPEED, 1.5)
+                        print(f"Driving forward for {PICKUP_REVERSE_CENTER_DRIVE_TIME_SEC} seconds to center on intersection...")
+                        drive_straight_for_time(BASE_SPEED, PICKUP_REVERSE_CENTER_DRIVE_TIME_SEC)
                         print("Centered on intersection.")
 
                         # Reset global PID state after temporary segment
@@ -1073,8 +1083,8 @@ def run_line_follower():
                         print(f"\n*** NODE DETECTED! Arrived at {node_just_arrived_at}. Stopping briefly. ***")
                         sleep_ms(NODE_STOP_TIME_MS)
                         
-                        print("Driving forward for 1 second to clear node with wheels...")
-                        drive_straight_for_time(BASE_SPEED, 1.0) # Robot is now past Node_X, centered.
+                        print(f"Driving forward for {NODE_CLEAR_DRIVE_TIME_SEC} second to clear node with wheels...")
+                        drive_straight_for_time(BASE_SPEED, NODE_CLEAR_DRIVE_TIME_SEC) # Robot is now past Node_X, centered.
 
                         last_node_detection_time = current_time
                         last_loop_time_lf_pid = ticks_ms() 
@@ -1129,20 +1139,17 @@ def run_line_follower():
                             # Determine the desired orientation to enter the P-node from the junction node
                             desired_orientation_to_p_node = get_direction_between_nodes(junction_node, current_target_node, corrected_weighted_grid)
                             
-                            delivery_drive_duration = 0.0
+                            delivery_drive_duration = DELIVERY_DRIVE_INTO_PNODE_TIME_SEC # User requested this to be fixed at 1.0 second.
                             if desired_orientation_to_p_node:
                                 relative_turn_to_p_node = calculate_relative_turn_angle(current_robot_orientation, desired_orientation_to_p_node)
                                 print(f"Orienting from {junction_node} towards {current_target_node} ({desired_orientation_to_p_node}). Relative Turn: {relative_turn_to_p_node * 180/pi:.2f} deg")
                                 if abs(relative_turn_to_p_node) > 0.01: # Only turn if significantly different
                                     orient_robot(relative_turn_to_p_node) # This updates current_robot_orientation
                                 
-                                # Get the weight for the drive duration (distance from junction to P-node)
-                                delivery_drive_duration = corrected_weighted_grid[junction_node][desired_orientation_to_p_node][1]
-                                print(f"Calculated delivery drive duration: {delivery_drive_duration} seconds.")
+                                print(f"Using fixed delivery drive duration: {delivery_drive_duration} seconds.")
                             else:
                                 print(f"CRITICAL WARNING: Could not determine direction for orientation from {junction_node} to {current_target_node}. Using default duration. This indicates a map error or logic flaw.")
-                                delivery_drive_duration = 1
-
+                                # delivery_drive_duration is already set to DELIVERY_DRIVE_INTO_PNODE_TIME_SEC
 
                             print(f"Driving forward for {delivery_drive_duration} seconds to position for delivery...")
                             drive_straight_for_time(BASE_SPEED, delivery_drive_duration)
@@ -1208,24 +1215,11 @@ def run_line_follower():
                             if not reversed_to_node_delivery:
                                 print("Warning: Did not detect a node while reversing from delivery. Might be off track.")
                             
-                            print(f"Driving forward for 1.5 seconds to center on intersection {junction_node}...")
-                            drive_straight_for_time(BASE_SPEED, 1.75)
-                            print("Centered on intersection.")
-
                             # Reset global PID state after temporary segment
                             last_error_lf = 0
                             integral_lf = 0
                             last_loop_time_lf_pid = ticks_ms() 
 
-                            # IMPORTANT FIX: When reversing from a P-node, the robot's physical orientation
-                            # does NOT change. It simply moves backward.
-                            # So, we should NOT update current_robot_orientation to the opposite direction.
-                            # direction_into_p_node = get_direction_between_nodes(junction_node, delivery_p_node, corrected_weighted_grid)
-                            # if direction_into_p_node:
-                            #     current_robot_orientation = get_opposite_direction(direction_into_p_node)
-                            #     print(f"After reversing from {delivery_p_node}, robot is at {junction_node}, facing {current_robot_orientation}.")
-                            # else:
-                            #     print(f"Warning: Could not determine entry direction to delivery P-node {delivery_p_node}.")
                             print(f"After reversing from {delivery_p_node}, robot is at {junction_node}, maintaining previous orientation {current_robot_orientation}.")
 
 
