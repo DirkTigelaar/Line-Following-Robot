@@ -254,6 +254,8 @@ OBSTACLE_REVERSE_CENTER_DRIVE_TIME_SEC = 1.5
 DELIVERY_DRIVE_INTO_PNODE_TIME_SEC = 1.0
 # Fixed duration to drive from the node before a delivery junction to the junction itself
 DELIVERY_JUNCTION_CENTER_DRIVE_TIME_SEC = 0 # New constant for precise centering
+# Duration to drive forward after backing up from a delivery P-node to center on intersection
+DELIVERY_REVERSE_FORWARD_CENTER_DRIVE_TIME_SEC = 1.5
 
 
 # ----- Path Planning Grid (Corrected and Weighted) -----
@@ -1224,6 +1226,11 @@ def run_line_follower():
 
                             print(f"After reversing from {delivery_p_node}, robot is at {junction_node}, maintaining previous orientation {current_robot_orientation}.")
 
+                            # --- ADDED: Drive forward a little after backing up from delivery ---
+                            print(f"Driving forward for {DELIVERY_REVERSE_FORWARD_CENTER_DRIVE_TIME_SEC} seconds to center after delivery reverse...")
+                            drive_straight_for_time(BASE_SPEED, DELIVERY_REVERSE_FORWARD_CENTER_DRIVE_TIME_SEC)
+                            print("Centered after delivery reverse.")
+                            # --- END ADDED BLOCK ---
 
                             current_mission_idx += 1
                             if current_mission_idx < len(MISSION_PLAN):
