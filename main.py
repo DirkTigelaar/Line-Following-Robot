@@ -162,7 +162,6 @@ electromagnet = Pin(5, Pin.OUT)
 electromagnet.off()
 
 # IR line sensors (assuming 5 sensors: left_outer, left_inner, center, right_inner, right_outer)
-# Updated based on user's correction
 ir_pins = [
     Pin(39, Pin.IN), # Left-most
     Pin(36, Pin.IN),
@@ -235,7 +234,7 @@ NODE_SENSOR_THRESHOLD = 3
 # Time to stop at a node (in ms)
 NODE_STOP_TIME_MS = 500
 # Cooldown period for node detection (in ms)
-NODE_DETECTION_COOLDOWN_MS = 1500 # 2 seconds
+NODE_DETECTION_COOLDOWN_MS = 2000 # 2 seconds
 
 # ----- Obstacle Detection Parameters ---
 OBSTACLE_DISTANCE_CM = 10 # Distance threshold for obstacle detection in cm
@@ -246,13 +245,15 @@ PRINT_INTERVAL_MS = 200 # Print debug info every 200 milliseconds
 
 # --- Global Timings for Driving After Nodes/Maneuvers ---
 # Duration to drive forward after detecting a general node to clear it with wheels
-NODE_CLEAR_DRIVE_TIME_SEC = 1.0
+NODE_CLEAR_DRIVE_TIME_SEC = 1.5
 # Duration to drive forward after reversing from a pickup P-node to center on intersection
 PICKUP_REVERSE_CENTER_DRIVE_TIME_SEC = 1.5
 # Duration to drive forward after reversing from an obstacle to center on intersection
 OBSTACLE_REVERSE_CENTER_DRIVE_TIME_SEC = 1.5
 # Fixed duration to drive into a delivery P-node
 DELIVERY_DRIVE_INTO_PNODE_TIME_SEC = 1.0
+# Fixed duration to drive from the node before a delivery junction to the junction itself
+DELIVERY_JUNCTION_CENTER_DRIVE_TIME_SEC = 0 # New constant for precise centering
 
 
 # ----- Path Planning Grid (Corrected and Weighted) -----
@@ -1116,16 +1117,17 @@ def run_line_follower():
                             
                             # Determine direction and duration to drive to the junction node
                             direction_to_junction = get_direction_between_nodes(node_just_arrived_at, junction_node, corrected_weighted_grid)
-                            drive_to_junction_duration = 0.0
+                            
+                            # Use the new precise constant for driving into the delivery junction
+                            drive_to_junction_duration = DELIVERY_JUNCTION_CENTER_DRIVE_TIME_SEC 
                             if direction_to_junction:
-                                drive_to_junction_duration = corrected_weighted_grid[node_just_arrived_at][direction_to_junction][1]
                                 # Orient towards the junction if necessary
                                 relative_turn_to_junction = calculate_relative_turn_angle(current_robot_orientation, direction_to_junction)
                                 if abs(relative_turn_to_junction) > 0.01:
                                     orient_robot(relative_turn_to_junction)
                             else:
                                 print(f"Warning: Could not determine direction from {node_just_arrived_at} to junction {junction_node}. Using default drive time.")
-                                drive_to_junction_duration = 1.0 # Fallback
+                                # drive_to_junction_duration is already set to DELIVERY_JUNCTION_CENTER_DRIVE_TIME_SEC
 
                             drive_straight_for_time(BASE_SPEED, drive_to_junction_duration)
                             
@@ -1139,7 +1141,7 @@ def run_line_follower():
                             # Determine the desired orientation to enter the P-node from the junction node
                             desired_orientation_to_p_node = get_direction_between_nodes(junction_node, current_target_node, corrected_weighted_grid)
                             
-                            delivery_drive_duration = DELIVERY_DRIVE_INTO_PNODE_TIME_SEC # User requested this to be fixed at 1.0 second.
+                            delivery_drive_duration = DELIVERY_DRIVE_INTO_PNODE_TIME_SEC 
                             if desired_orientation_to_p_node:
                                 relative_turn_to_p_node = calculate_relative_turn_angle(current_robot_orientation, desired_orientation_to_p_node)
                                 print(f"Orienting from {junction_node} towards {current_target_node} ({desired_orientation_to_p_node}). Relative Turn: {relative_turn_to_p_node * 180/pi:.2f} deg")
@@ -1156,7 +1158,7 @@ def run_line_follower():
                             
                             print("Deactivating electromagnet to drop box.")
                             electromagnet.off()
-                            sleep(2)
+                            sleep(0.5) # Reduced sleep time
                             
                             # Step 3: Drive backward from P-node to the junction node.
                             print(f"Driving backward to return to junction node {junction_node}...")
