@@ -212,7 +212,7 @@ pin_a2.irq(trigger=Pin.IRQ_RISING | Pin.IRQ_FALLING, handler=update_position2)
 
 # ----- Line Following Specific Paramters ---
 # PID constants for line following (tuned for smoother performance)
-KP_LF = 800   # Proportional gain (adjusted from 80)
+KP_LF = 1200   # Proportional gain (adjusted from 80)
 KI_LF = 0.5  # Integral gain (small value to reduce steady-state error)
 KD_LF = 250  # Derivative gain (adjusted from 200, higher value for dampening oscillations)
 MAX_CORRECTION = 300 # Max correction applied to speed
@@ -223,7 +223,7 @@ KI_TURN = 8   # Integral gain for turning (increased for better drift correction
 KD_TURN = 650 # Derivative gain for turning (increased for better damping)
 
 # New PID constants for reverse line following
-KP_LF_REV = 100 # Proportional gain for reverse line following (can be different from forward)
+KP_LF_REV = 1200 # Proportional gain for reverse line following (can be different from forward)
 KI_LF_REV = 0.8 # Integral gain for reverse line following (slightly increased)
 KD_LF_REV = 300 # Derivative gain for reverse line following (slightly increased)
 
@@ -1170,7 +1170,7 @@ def run_line_follower():
                             temp_last_loop_time_lf_pid = ticks_ms()
                             last_node_detection_time = ticks_ms() # Reset cooldown before reverse line following
 
-                            while ticks_diff(ticks_ms(), start_reverse_time_delivery) < 3000:
+                            while ticks_diff(ticks_ms(), start_reverse_time_delivery) < 15000:
                                 current_time_loop_rev_del = ticks_ms()
                                 dt_loop_rev_del = (current_time_loop_rev_del - temp_last_loop_time_lf_pid) / 1000.0
                                 temp_last_loop_time_lf_pid = current_time_loop_rev_del
@@ -1394,3 +1394,5 @@ current_robot_orientation = 'N'
 
 # Start the line following loop (robot will start moving after path is calculated and printed)
 run_line_follower()
+
+
