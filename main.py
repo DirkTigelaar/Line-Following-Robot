@@ -230,7 +230,7 @@ KD_LF_REV = 300 # Derivative gain for reverse line following (slightly increased
 
 # ----- Node Detection Parameters ---
 # Threshold for number of active sensors to consider it a node
-NODE_SENSOR_THRESHOLD = 2 # Changed from 3 to 2 for higher detection rate
+NODE_SENSOR_THRESHOLD = 3 # Changed from 2 to 3 for higher precision
 # Time to stop at a node (in ms)
 NODE_STOP_TIME_MS = 500
 # Cooldown period for node detection (in ms)
@@ -457,22 +457,20 @@ def is_node_detected_robust(ir_values, num_active_sensors):
         bool: True if a node is detected, False otherwise.
     """
     # Pattern 1: A significant number of sensors are active, indicating a wide line or intersection.
-    # This is useful for '+' intersections or very wide 'T' junctions.
-    if num_active_sensors >= NODE_SENSOR_THRESHOLD: # NODE_SENSOR_THRESHOLD is now 2
+    # With NODE_SENSOR_THRESHOLD = 3, at least 3 sensors must be active.
+    if num_active_sensors >= NODE_SENSOR_THRESHOLD:
         return True
 
     # Pattern 2: Detects a clear T-junction or 90-degree turn to the left.
     # Left-outer, left-inner, and center sensors are on the line.
-    # This implies the robot is approaching a left turn from the main line.
     if ir_values[0] == 0 and ir_values[1] == 0 and ir_values[2] == 0:
         return True
-    
+
     # Pattern 3: Detects a clear T-junction or 90-degree turn to the right.
     # Right-outer, right-inner, and center sensors are on the line.
-    # This implies the robot is approaching a right turn from the main line.
     if ir_values[2] == 0 and ir_values[3] == 0 and ir_values[4] == 0:
         return True
-    
+
     # Pattern 4: All sensors are on the line. This is a strong indicator of a major intersection.
     if ir_values == [0, 0, 0, 0, 0]:
         return True
@@ -480,24 +478,24 @@ def is_node_detected_robust(ir_values, num_active_sensors):
     # Pattern for a distinct side road to the left (leftmost and center on line, rightmost off)
     if ir_values[0] == 0 and ir_values[2] == 0 and ir_values[4] == 1:
         return True
-    
+
     # Pattern for a distinct side road to the right (rightmost and center on line, leftmost off)
     if ir_values[4] == 0 and ir_values[2] == 0 and ir_values[0] == 1:
         return True
 
-    # NEW Pattern: Detects a right side road where the center sensor is off, but right-inner and right-outer are on.
-    # This covers cases like 11100 where the robot might be slightly misaligned or the line is wider.
+    # NEW Pattern (as per user request): Detects a right side road (11100)
+    # where the center sensor is off, but right-inner and right-outer are on.
     if ir_values[2] == 1 and ir_values[3] == 0 and ir_values[4] == 0:
         return True
 
-    # NEW Pattern: Detects a left side road where the center sensor is off, but left-outer and left-inner are on.
-    # This covers cases like 00111 where the robot might be slightly misaligned or the line is wider.
+    # NEW Pattern (as per user request): Detects a left side road (00111)
+    # where the center sensor is off, but left-outer and left-inner are on.
     if ir_values[0] == 0 and ir_values[1] == 0 and ir_values[2] == 1:
         return True
     
     # Another pattern for wider lines/junctions where inner sensors are active along with center,
     # suggesting widening of the path or a junction forming.
-    if (ir_values[1] == 0 and ir_values[2] == 0 and ir_values[3] == 0): # Inner three sensors active
+    if (ir_values[1] == 0 and ir_values[2] == 0 and ir_values[3] == 0):
         return True
 
     return False
@@ -1396,4 +1394,3 @@ current_robot_orientation = 'N'
 
 # Start the line following loop (robot will start moving after path is calculated and printed)
 run_line_follower()
-
