@@ -213,10 +213,10 @@ pin_a2.irq(trigger=Pin.IRQ_RISING | Pin.IRQ_FALLING, handler=update_position2)
 
 # ----- Line Following Specific Paramters ---
 # PID constants for line following (tuned for smoother performance)
-KP_LF = 90   # Proportional gain (adjusted from 80)
+KP_LF = 120   # Proportional gain (adjusted from 80)
 KI_LF = 0.5  # Integral gain (small value to reduce steady-state error)
 KD_LF = 250  # Derivative gain (adjusted from 200, higher value for dampening oscillations)
-MAX_CORRECTION = 200 # Max correction applied to speed
+MAX_CORRECTION = 300 # Max correction applied to speed
 
 # PID constants for orientation turns
 KP_TURN = 280 # Proportional gain for turning (slightly increased for responsiveness)
@@ -1124,7 +1124,7 @@ def run_line_follower():
                                 print("Warning: Did not detect a node while reversing from delivery. Might be off track.")
                             
                             print(f"Driving forward for 1.5 seconds to center on intersection {junction_node}...")
-                            drive_straight_for_time(BASE_SPEED, 1.5)
+                            drive_straight_for_time(BASE_SPEED, 1.75)
                             print("Centered on intersection.")
 
                             # Reset global PID state after temporary segment
@@ -1294,4 +1294,3 @@ current_robot_orientation = 'N'
 
 # Start the line following loop (robot will start moving after path is calculated and printed)
 run_line_follower()
-
