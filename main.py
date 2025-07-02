@@ -233,12 +233,13 @@ KD_LF_REV = 300 # Derivative gain for reverse line following (slightly increased
 # Threshold for number of active sensors to consider it a node
 NODE_SENSOR_THRESHOLD = 3
 # Time to stop at a node (in ms)
-NODE_STOP_TIME_MS = 250
+NODE_STOP_TIME_MS = 500
 # Cooldown period for node detection (in ms)
-NODE_DETECTION_COOLDOWN_MS = 2000 # 2 seconds
+NODE_DETECTION_COOLDOWN_MS = 1500 # 2 seconds
 
 # ----- Obstacle Detection Parameters ---
 OBSTACLE_DISTANCE_CM = 10 # Distance threshold for obstacle detection in cm
+OBSTACLE_DEBOUNCE_COUNT = 5 # Number of consecutive readings to confirm an obstacle
 
 # Printing interval for debug information
 PRINT_INTERVAL_MS = 200 # Print debug info every 200 milliseconds
@@ -501,6 +502,7 @@ current_delivery_node = ""
 
 # Global variable for obstacle detection
 obstacle_detected_flag = False
+obstacle_readings_count = 0 # Counter for consecutive obstacle readings
 
 # Global variables to manage path
 calculated_path = [] # Will be populated initially and recalculated
@@ -566,7 +568,7 @@ def orient_robot(relative_angle_radians):
     # For relative turn, we simply want to make total_turned_angle reach relative_angle_radians
     
     # Define a smaller tolerance for stopping the turn, as we are accumulating error
-    TURN_TOLERANCE_RAD = 1.0 * (pi / 180.0) # 1 degree tolerance
+    TURN_TOLERANCE_RAD = 5.0 * (pi / 180.0) # 1 degree tolerance
 
     while abs(relative_angle_radians - total_turned_angle) > TURN_TOLERANCE_RAD and turn_count < max_turn_attempts:
         current_time_loop = ticks_ms()
@@ -644,7 +646,8 @@ def run_line_follower():
     global current_path_idx, last_node_detection_time, obstacle_detected_flag, \
            calculated_path, current_mission_idx, current_mission_state, \
            current_pickup_node, current_delivery_node, current_target_node, \
-           last_error_lf, integral_lf, last_print_time, current_robot_orientation
+           last_error_lf, integral_lf, last_print_time, current_robot_orientation, \
+           obstacle_readings_count # Add new global for debouncing
 
     # Define weights locally within the function to ensure scope
     weights = [-2, -1, 0, 1, 2] # Weights for error calculation. Assumes sensors are arranged Left-most to Right-most physically.
@@ -731,96 +734,98 @@ def run_line_follower():
             # Ultrasonic distance
             dist = read_distance(trig, echo)
             
-            # --- Obstacle Detection Logic ---
-            is_obstacle_currently_present = (dist != -1 and dist < OBSTACLE_DISTANCE_CM)
+            # --- Obstacle Detection Logic with Debouncing ---
+            is_obstacle_currently_reading = (dist != -1 and dist < OBSTACLE_DISTANCE_CM)
 
-            if is_obstacle_currently_present:
-                if not obstacle_detected_flag: # Obstacle just appeared
-                    obstacle_detected_flag = True
-                    stop_motors() # Ensure motors are stopped before turning
-                    print("\n!!! OBSTACLE DETECTED! Performing 180-degree spin in place and recalculating path. !!!")
+            if is_obstacle_currently_reading:
+                obstacle_readings_count += 1
+                if obstacle_readings_count >= OBSTACLE_DEBOUNCE_COUNT:
+                    if not obstacle_detected_flag: # Obstacle just confirmed
+                        obstacle_detected_flag = True
+                        stop_motors() # Ensure motors are stopped before turning
+                        print("\n!!! OBSTACLE DETECTED! Performing 180-degree spin in place and recalculating path. !!!")
 
-                    # Determine the segment that is blocked by the obstacle
-                    if current_path_idx < len(calculated_path):
-                        # The robot is currently trying to reach calculated_path[current_path_idx].
-                        # The segment before it is the one just traversed or the current start.
-                        if current_path_idx == 0:
-                            blocked_segment_start_node = calculated_path[0] # Assuming this is the 'from' node for the first segment
-                            if len(calculated_path) > 1:
-                                blocked_segment_end_node = calculated_path[1]
-                            else: 
-                                print("Warning: Path is too short to determine a blocked segment for obstacle.")
-                                blocked_segment_start_node = None
-                                blocked_segment_end_node = None
-                        else:
-                            blocked_segment_start_node = calculated_path[current_path_idx - 1]
-                            blocked_segment_end_node = calculated_path[current_path_idx]
-                    else: # Robot is at or past the goal
-                        print("Warning: Obstacle detected but robot is at or beyond goal node's index. Cannot block a specific segment.")
-                        stop_motors()
-                        sleep(5)
-                        return # Exit to avoid errors or endless loop
-
-                    if blocked_segment_start_node and blocked_segment_end_node:
-                        # Increase the weight of the path segment to effectively block it
-                        if not block_path_segment_by_weight(blocked_segment_start_node, blocked_segment_end_node, corrected_weighted_grid, new_weight=1000.0):
-                             print(f"Warning: Could not find or block segment from {blocked_segment_start_node} to {blocked_segment_end_node}.")
-                    else:
-                        print("Warning: Could not determine valid segment to block due to path length or index issues. Proceeding with recalculation anyway.")
-                        
-                    perform_180_turn() # This updates current_robot_orientation
-
-                    # Recalculate path from the last successfully reached node to the goal.
-                    # This needs to be the node we were *approaching* or *at* when the obstacle was detected.
-                    current_robot_node_for_recalc = calculated_path[current_path_idx - 1] if current_path_idx > 0 else calculated_path[0]
-                    
-                    # Recalculate the path to the current mission target
-                    if current_mission_state == MISSION_STATE_PICKUP:
-                        target_goal_node = current_pickup_node
-                    else: # MISSION_STATE_DELIVER
-                        target_goal_node = current_delivery_node
-
-                    new_calculated_path = find_path_dijkstra(current_robot_node_for_recalc, target_goal_node, corrected_weighted_grid)
-                    
-                    if not new_calculated_path:
-                        print("CRITICAL ERROR: No alternative path found after obstacle. Stopping.")
-                        stop_motors()
-                        return # Exit the function, robot is stuck
-                    else:
-                        print(f"New path calculated: {new_calculated_path}")
-                        calculated_path = new_calculated_path
-                        
-                        if len(calculated_path) > 1:
-                            current_path_idx = 1 # Index of the first actual target node in the new path
-                            current_target_node = calculated_path[current_path_idx]
-                            
-                            # Orient robot towards the next target in the new path
-                            node_at_recalc = calculated_path[0] # This is where the robot is after 180 turn
-                            next_node_in_path = calculated_path[1]
-
-                            # Determine the desired cardinal orientation for the next segment
-                            desired_orientation_to_next = get_direction_between_nodes(node_at_recalc, next_node_in_path, corrected_weighted_grid)
-                            
-                            if desired_orientation_to_next:
-                                relative_turn = calculate_relative_turn_angle(current_robot_orientation, desired_orientation_to_next)
-                                print(f"Orienting from {node_at_recalc} towards {next_node_in_path} ({desired_orientation_to_next}). Relative Turn: {relative_turn * 180/pi:.2f} deg")
-                                if abs(relative_turn) > 0.01: # Only turn if significantly different
-                                    orient_robot(relative_turn) # This updates current_robot_orientation
+                        # Determine the segment that is blocked by the obstacle
+                        if current_path_idx < len(calculated_path):
+                            # The robot is currently trying to reach calculated_path[current_path_idx].
+                            # The segment before it is the one just traversed or the current start.
+                            if current_path_idx == 0:
+                                blocked_segment_start_node = calculated_path[0] # Assuming this is the 'from' node for the first segment
+                                if len(calculated_path) > 1:
+                                    blocked_segment_end_node = calculated_path[1]
+                                else: 
+                                    print("Warning: Path is too short to determine a blocked segment for obstacle.")
+                                    blocked_segment_start_node = None
+                                    blocked_segment_end_node = None
                             else:
-                                print(f"Warning: Could not determine direction for orientation from {node_at_recalc} to {next_node_in_path} after obstacle.")
+                                blocked_segment_start_node = calculated_path[current_path_idx - 1]
+                                blocked_segment_end_node = calculated_path[current_path_idx]
+                        else: # Robot is at or past the goal
+                            print("Warning: Obstacle detected but robot is at or beyond goal node's index. Cannot block a specific segment.")
+                            stop_motors()
+                            sleep(5)
+                            return # Exit to avoid errors or endless loop
+
+                        if blocked_segment_start_node and blocked_segment_end_node:
+                            # Increase the weight of the path segment to effectively block it
+                            if not block_path_segment_by_weight(blocked_segment_start_node, blocked_segment_end_node, corrected_weighted_grid, new_weight=1000.0):
+                                 print(f"Warning: Could not find or block segment from {blocked_segment_start_node} to {blocked_segment_end_node}.")
+                        else:
+                            print("Warning: Could not determine valid segment to block due to path length or index issues. Proceeding with recalculation anyway.")
                             
-                            print(f"Obstacle path recalculation: Next Node to Target set to {current_target_node}") 
-                        else: # Path is just one node (robot is already at the target)
-                            current_path_idx = 0
-                            current_target_node = calculated_path[0]
-                            print(f"Obstacle path recalculation: Next Node to Target set to {current_target_node} (single node path)") 
+                        perform_180_turn() # This updates current_robot_orientation
+
+                        # Recalculate path from the last successfully reached node to the goal.
+                        # This needs to be the node we were *approaching* or *at* when the obstacle was detected.
+                        current_robot_node_for_recalc = calculated_path[current_path_idx - 1] if current_path_idx > 0 else calculated_path[0]
                         
-                        obstacle_detected_flag = False # Reset flag to allow normal operation
-            
-            # Handle obstacle clearance *after* any potential re-calculation and re-orientation
-            if not is_obstacle_currently_present and obstacle_detected_flag:
-                print("--- Obstacle cleared. Resuming. ---")
-                obstacle_detected_flag = False
+                        # Recalculate the path to the current mission target
+                        if current_mission_state == MISSION_STATE_PICKUP:
+                            target_goal_node = current_pickup_node
+                        else: # MISSION_STATE_DELIVER
+                            target_goal_node = current_delivery_node
+
+                        new_calculated_path = find_path_dijkstra(current_robot_node_for_recalc, target_goal_node, corrected_weighted_grid)
+                        
+                        if not new_calculated_path:
+                            print("CRITICAL ERROR: No alternative path found after obstacle. Stopping.")
+                            stop_motors()
+                            return # Exit the function, robot is stuck
+                        else:
+                            print(f"New path calculated: {new_calculated_path}")
+                            calculated_path = new_calculated_path
+                            
+                            if len(calculated_path) > 1:
+                                current_path_idx = 1 # Index of the first actual target node in the new path
+                                current_target_node = calculated_path[current_path_idx]
+                                
+                                # Orient robot towards the next target in the new path
+                                node_at_recalc = calculated_path[0] # This is where the robot is after 180 turn
+                                next_node_in_path = calculated_path[1]
+
+                                # Determine the desired cardinal orientation for the next segment
+                                desired_orientation_to_next = get_direction_between_nodes(node_at_recalc, next_node_in_path, corrected_weighted_grid)
+                                
+                                if desired_orientation_to_next:
+                                    relative_turn = calculate_relative_turn_angle(current_robot_orientation, desired_orientation_to_next)
+                                    print(f"Orienting from {node_at_recalc} towards {next_node_in_path} ({desired_orientation_to_next}). Relative Turn: {relative_turn * 180/pi:.2f} deg")
+                                    if abs(relative_turn) > 0.01: # Only turn if significantly different
+                                        orient_robot(relative_turn) # This updates current_robot_orientation
+                                else:
+                                    print(f"Warning: Could not determine direction for orientation from {node_at_recalc} to {next_node_in_path} after obstacle.")
+                                
+                                print(f"Obstacle path recalculation: Next Node to Target set to {current_target_node}") 
+                            else: # Path is just one node (robot is already at the target)
+                                current_path_idx = 0
+                                current_target_node = calculated_path[0]
+                                print(f"Obstacle path recalculation: Next Node to Target set to {current_target_node} (single node path)") 
+                            
+                            # obstacle_detected_flag is already True, no need to reset here
+            else: # Current reading does NOT indicate an obstacle
+                obstacle_readings_count = 0 # Reset counter
+                if obstacle_detected_flag: # Obstacle was previously detected but now cleared
+                    print("--- Obstacle cleared. Resuming. ---")
+                    obstacle_detected_flag = False
             
             # This main block only executes if no obstacle is currently preventing movement
             if not obstacle_detected_flag:
@@ -1051,7 +1056,7 @@ def run_line_follower():
                                 print(f"Calculated delivery drive duration: {delivery_drive_duration} seconds.")
                             else:
                                 print(f"CRITICAL WARNING: Could not determine direction for orientation from {junction_node} to {current_target_node}. Using default duration. This indicates a map error or logic flaw.")
-                                delivery_drive_duration = 2.0 
+                                delivery_drive_duration = 1.5 
 
 
                             print(f"Driving forward for {delivery_drive_duration} seconds to position for delivery...")
@@ -1069,6 +1074,7 @@ def run_line_follower():
                             temp_last_error_lf = 0
                             temp_integral_lf = 0
                             temp_last_loop_time_lf_pid = ticks_ms()
+                            delivery_p_node = current_target_node # Store for clarity
 
                             while ticks_diff(ticks_ms(), start_reverse_time_delivery) < 3000:
                                 current_time_loop_rev_del = ticks_ms()
@@ -1254,6 +1260,7 @@ def run_line_follower():
                 print("Button Pressed:", button_pressed)
                 print("Robot Cardinal Orientation:", current_robot_orientation)
                 print("Obstacle Detected Flag:", obstacle_detected_flag)
+                print("Obstacle Readings Count:", obstacle_readings_count) # Added for debug
                 print("Current Mission Index:", current_mission_idx)
                 print("Current Mission State:", "PICKUP" if current_mission_state == MISSION_STATE_PICKUP else "DELIVER" if current_mission_state == MISSION_STATE_DELIVER else "COMPLETE")
                 print("Current Pickup Node:", current_pickup_node)
