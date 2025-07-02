@@ -239,7 +239,7 @@ NODE_DETECTION_COOLDOWN_MS = 1500 # 2 seconds
 
 # ----- Obstacle Detection Parameters ---
 OBSTACLE_DISTANCE_CM = 10 # Distance threshold for obstacle detection in cm
-OBSTACLE_DEBOUNCE_COUNT = 5 # Number of consecutive readings to confirm an obstacle
+OBSTACLE_DEBOUNCE_COUNT = 3 # Number of consecutive readings to confirm an obstacle
 
 # Printing interval for debug information
 PRINT_INTERVAL_MS = 200 # Print debug info every 200 milliseconds
@@ -743,7 +743,7 @@ def run_line_follower():
                     if not obstacle_detected_flag: # Obstacle just confirmed
                         obstacle_detected_flag = True
                         stop_motors() # Ensure motors are stopped before turning
-                        print("\n!!! OBSTACLE DETECTED! Performing 180-degree spin in place and recalculating path. !!!")
+                        print("\n!!! OBSTACLE DETECTED! Reversing to last node and recalculating path. !!!")
 
                         # Determine the segment that is blocked by the obstacle
                         if current_path_idx < len(calculated_path):
@@ -773,11 +773,94 @@ def run_line_follower():
                         else:
                             print("Warning: Could not determine valid segment to block due to path length or index issues. Proceeding with recalculation anyway.")
                             
-                        perform_180_turn() # This updates current_robot_orientation
+                        # --- NEW: Reverse to the last node instead of 180-degree turn ---
+                        print("Driving backward, line following to the last traversed node...")
+                        start_reverse_time_obstacle = ticks_ms()
+                        reversed_to_node_obstacle = False
+                        
+                        temp_last_error_lf_obs = 0
+                        temp_integral_lf_obs = 0
+                        temp_last_loop_time_lf_obs = ticks_ms() 
+
+                        while ticks_diff(ticks_ms(), start_reverse_time_obstacle) < 3000: # Max 3 seconds reverse
+                            current_time_loop_rev_obs = ticks_ms()
+                            dt_loop_rev_obs = (current_time_loop_rev_obs - temp_last_loop_time_lf_obs) / 1000.0 
+                            temp_last_loop_time_lf_obs = current_time_loop_rev_obs 
+
+                            if dt_loop_rev_obs <= 0: 
+                                sleep_ms(1)
+                                continue
+
+                            ir_values_reverse_obs = [pin.value() for pin in ir_pins]
+                            num_active_sensors_reverse_obs = sum(1 for val in ir_values_reverse_obs if val == 0)
+
+                            if num_active_sensors_reverse_obs > 0:
+                                weighted_sum_reverse_obs = sum(weights[i] for i, val in enumerate(ir_values_reverse_obs) if val == 0)
+                                current_error_reverse_obs = weighted_sum_reverse_obs 
+                                
+                                temp_integral_lf_obs += current_error_reverse_obs * dt_loop_rev_obs
+                                derivative_lf_obs = (current_error_reverse_obs - temp_last_error_lf_obs) / dt_loop_rev_obs 
+                                temp_last_error_lf_obs = current_error_reverse_obs
+
+                                correction_reverse_obs = int((KP_LF_REV * current_error_reverse_obs) + (KI_LF_REV * temp_integral_lf_obs) + (KD_LF_REV * derivative_lf_obs))
+                                correction_reverse_obs = max(-MAX_CORRECTION, min(correction_reverse_obs, MAX_CORRECTION))
+
+                                left_speed_rev_obs = -REVERSE_SPEED + correction_reverse_obs
+                                right_speed_rev_obs = -REVERSE_SPEED - correction_reverse_obs
+
+                                left_speed_rev_obs = max(-1023, min(left_speed_rev_obs, 0))
+                                right_speed_rev_obs = max(-1023, min(right_speed_rev_obs, 0))
+
+                                set_motor_speed(motor1_pwm, motor1_in2_pin, left_speed_rev_obs)
+                                set_motor_speed(motor2_pwm, motor2_in2_pin, right_speed_rev_obs)
+                            else:
+                                print("Line lost while reversing from obstacle! Attempting straight backward movement.")
+                                set_motor_speed(motor1_pwm, motor1_in2_pin, -REVERSE_SPEED)
+                                set_motor_speed(motor2_pwm, motor2_in2_pin, -REVERSE_SPEED)
+                                temp_integral_lf_obs = 0
+                                temp_last_error_lf_obs = 0
+                            
+                            if is_node_detected_robust(ir_values_reverse_obs, num_active_sensors_reverse_obs):
+                                print("Backed up onto a node. Stopping reverse line following from obstacle.")
+                                reversed_to_node_obstacle = True
+                                break
+                            sleep_ms(5)
+                        stop_motors()
+                        if not reversed_to_node_obstacle:
+                            print("Warning: Did not detect a node while reversing from obstacle. Might be off track.")
+                        
+                        print("Driving forward for 1.5 seconds to center on intersection...")
+                        drive_straight_for_time(BASE_SPEED, 1.5)
+                        print("Centered on intersection.")
+
+                        # Reset global PID state after temporary segment
+                        last_error_lf = 0
+                        integral_lf = 0
+                        last_loop_time_lf_pid = ticks_ms() 
+
+                        # Update robot's orientation after backing out.
+                        # The robot reversed from `blocked_segment_end_node` to `blocked_segment_start_node`.
+                        # Its new orientation is the direction from `blocked_segment_end_node` to `blocked_segment_start_node`.
+                        # IMPORTANT FIX: When reversing, the robot's physical orientation (the direction its front is pointing)
+                        # does NOT change. It simply moves backward along the line.
+                        # So, we should NOT update current_robot_orientation here based on the reverse path.
+                        # It should retain its orientation from before the reverse.
+                        # The subsequent orient_robot call will handle the turn to the new path segment.
+                        # if blocked_segment_start_node and blocked_segment_end_node:
+                        #     new_orientation_after_reverse = get_direction_between_nodes(blocked_segment_end_node, blocked_segment_start_node, corrected_weighted_grid)
+                        #     if new_orientation_after_reverse:
+                        #         current_robot_orientation = new_orientation_after_reverse
+                        #         print(f"After reversing from obstacle, robot is at {blocked_segment_start_node}, facing {current_robot_orientation}.")
+                        #     else:
+                        #         print(f"Warning: Could not determine orientation after reversing from obstacle.")
+                        # else:
+                        #     print("Warning: Blocked segment nodes not defined, cannot determine orientation after reversal.")
+                        print(f"After reversing from obstacle, robot is at {blocked_segment_start_node}, maintaining previous orientation {current_robot_orientation}.")
+
 
                         # Recalculate path from the last successfully reached node to the goal.
-                        # This needs to be the node we were *approaching* or *at* when the obstacle was detected.
-                        current_robot_node_for_recalc = calculated_path[current_path_idx - 1] if current_path_idx > 0 else calculated_path[0]
+                        # This is now `blocked_segment_start_node`.
+                        current_robot_node_for_recalc = blocked_segment_start_node
                         
                         # Recalculate the path to the current mission target
                         if current_mission_state == MISSION_STATE_PICKUP:
@@ -800,7 +883,7 @@ def run_line_follower():
                                 current_target_node = calculated_path[current_path_idx]
                                 
                                 # Orient robot towards the next target in the new path
-                                node_at_recalc = calculated_path[0] # This is where the robot is after 180 turn
+                                node_at_recalc = calculated_path[0] # This is where the robot is after reversing
                                 next_node_in_path = calculated_path[1]
 
                                 # Determine the desired cardinal orientation for the next segment
@@ -923,9 +1006,11 @@ def run_line_follower():
                                 break
 
                         if node_robot_is_at_after_reverse:
-                            # Robot's new current_robot_orientation is the opposite of the direction it entered the P-node from
-                            current_robot_orientation = get_opposite_direction(direction_entered_p_node_from)
-                            print(f"After reversing from {current_pickup_node}, robot is at {node_robot_is_at_after_reverse}, facing {current_robot_orientation}.")
+                            # IMPORTANT FIX: When reversing from a P-node, the robot's physical orientation
+                            # does NOT change. It simply moves backward.
+                            # So, we should NOT update current_robot_orientation to the opposite direction.
+                            # current_robot_orientation = get_opposite_direction(direction_entered_p_node_from)
+                            print(f"After reversing from {current_pickup_node}, robot is at {node_robot_is_at_after_reverse}, maintaining previous orientation {current_robot_orientation}.")
 
                             # Recalculate path from this entry node to the delivery node
                             calculated_path = find_path_dijkstra(node_robot_is_at_after_reverse, current_delivery_node, corrected_weighted_grid)
@@ -1056,7 +1141,7 @@ def run_line_follower():
                                 print(f"Calculated delivery drive duration: {delivery_drive_duration} seconds.")
                             else:
                                 print(f"CRITICAL WARNING: Could not determine direction for orientation from {junction_node} to {current_target_node}. Using default duration. This indicates a map error or logic flaw.")
-                                delivery_drive_duration = 1.5 
+                                delivery_drive_duration = 1
 
 
                             print(f"Driving forward for {delivery_drive_duration} seconds to position for delivery...")
@@ -1132,14 +1217,16 @@ def run_line_follower():
                             integral_lf = 0
                             last_loop_time_lf_pid = ticks_ms() 
 
-                            # Update robot's orientation after backing out of the P-node.
-                            # If it drove South into P5, it's now facing North.
-                            direction_into_p_node = get_direction_between_nodes(junction_node, delivery_p_node, corrected_weighted_grid)
-                            if direction_into_p_node:
-                                current_robot_orientation = get_opposite_direction(direction_into_p_node)
-                                print(f"After reversing from {delivery_p_node}, robot is at {junction_node}, facing {current_robot_orientation}.")
-                            else:
-                                print(f"Warning: Could not determine entry direction to delivery P-node {delivery_p_node}.")
+                            # IMPORTANT FIX: When reversing from a P-node, the robot's physical orientation
+                            # does NOT change. It simply moves backward.
+                            # So, we should NOT update current_robot_orientation to the opposite direction.
+                            # direction_into_p_node = get_direction_between_nodes(junction_node, delivery_p_node, corrected_weighted_grid)
+                            # if direction_into_p_node:
+                            #     current_robot_orientation = get_opposite_direction(direction_into_p_node)
+                            #     print(f"After reversing from {delivery_p_node}, robot is at {junction_node}, facing {current_robot_orientation}.")
+                            # else:
+                            #     print(f"Warning: Could not determine entry direction to delivery P-node {delivery_p_node}.")
+                            print(f"After reversing from {delivery_p_node}, robot is at {junction_node}, maintaining previous orientation {current_robot_orientation}.")
 
 
                             current_mission_idx += 1
@@ -1294,3 +1381,4 @@ current_robot_orientation = 'N'
 
 # Start the line following loop (robot will start moving after path is calculated and printed)
 run_line_follower()
+
