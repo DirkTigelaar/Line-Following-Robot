@@ -212,7 +212,7 @@ pin_a2.irq(trigger=Pin.IRQ_RISING | Pin.IRQ_FALLING, handler=update_position2)
 
 # ----- Line Following Specific Paramters ---
 # PID constants for line following (tuned for smoother performance)
-KP_LF = 120   # Proportional gain (adjusted from 80)
+KP_LF = 800   # Proportional gain (adjusted from 80)
 KI_LF = 0.5  # Integral gain (small value to reduce steady-state error)
 KD_LF = 250  # Derivative gain (adjusted from 200, higher value for dampening oscillations)
 MAX_CORRECTION = 300 # Max correction applied to speed
@@ -230,11 +230,11 @@ KD_LF_REV = 300 # Derivative gain for reverse line following (slightly increased
 
 # ----- Node Detection Parameters ---
 # Threshold for number of active sensors to consider it a node
-NODE_SENSOR_THRESHOLD = 3
+NODE_SENSOR_THRESHOLD = 2 # Changed from 3 to 2 for higher detection rate
 # Time to stop at a node (in ms)
 NODE_STOP_TIME_MS = 500
 # Cooldown period for node detection (in ms)
-NODE_DETECTION_COOLDOWN_MS = 2500 # Increased to 2.5 seconds for better stability
+NODE_DETECTION_COOLDOWN_MS = 1000 # Changed from 2500 to 1000 for faster re-detection
 
 # ----- Obstacle Detection Parameters ---
 OBSTACLE_DISTANCE_CM = 10 # Distance threshold for obstacle detection in cm
@@ -458,7 +458,7 @@ def is_node_detected_robust(ir_values, num_active_sensors):
     """
     # Pattern 1: A significant number of sensors are active, indicating a wide line or intersection.
     # This is useful for '+' intersections or very wide 'T' junctions.
-    if num_active_sensors >= NODE_SENSOR_THRESHOLD: # NODE_SENSOR_THRESHOLD is 3
+    if num_active_sensors >= NODE_SENSOR_THRESHOLD: # NODE_SENSOR_THRESHOLD is now 2
         return True
 
     # Pattern 2: Detects a clear T-junction or 90-degree turn to the left.
@@ -483,6 +483,16 @@ def is_node_detected_robust(ir_values, num_active_sensors):
     
     # Pattern for a distinct side road to the right (rightmost and center on line, leftmost off)
     if ir_values[4] == 0 and ir_values[2] == 0 and ir_values[0] == 1:
+        return True
+
+    # NEW Pattern: Detects a right side road where the center sensor is off, but right-inner and right-outer are on.
+    # This covers cases like 11100 where the robot might be slightly misaligned or the line is wider.
+    if ir_values[2] == 1 and ir_values[3] == 0 and ir_values[4] == 0:
+        return True
+
+    # NEW Pattern: Detects a left side road where the center sensor is off, but left-outer and left-inner are on.
+    # This covers cases like 00111 where the robot might be slightly misaligned or the line is wider.
+    if ir_values[0] == 0 and ir_values[1] == 0 and ir_values[2] == 1:
         return True
     
     # Another pattern for wider lines/junctions where inner sensors are active along with center,
@@ -921,7 +931,7 @@ def run_line_follower():
                         temp_integral_lf = 0
                         temp_last_loop_time_lf_pid = ticks_ms() 
 
-                        while ticks_diff(ticks_ms(), start_reverse_time) < 3000: # Max 3 seconds reverse
+                        while ticks_diff(ticks_ms(), start_reverse_time) < 15000: # Max 3 seconds reverse
                             current_time_loop_rev = ticks_ms()
                             dt_loop_rev = (current_time_loop_rev - temp_last_loop_time_lf_pid) / 1000.0 
                             temp_last_loop_time_lf_pid = current_time_loop_rev 
@@ -1386,5 +1396,4 @@ current_robot_orientation = 'N'
 
 # Start the line following loop (robot will start moving after path is calculated and printed)
 run_line_follower()
-
 
